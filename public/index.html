@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#2563eb">
+  <meta name="description" content="Súkromný živý obojsmerný hlasový prekladač cez Soniox.">
+  <title>Živý prekladač</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="loginShell" class="app-shell login-shell">
+    <section class="login-card" aria-label="Prihlásenie do prekladača">
+      <p class="login-kicker">Súkromný prístup</p>
+      <h1>Živý prekladač</h1>
+      <p class="login-copy">Zadaj prístupový kód. Bez overenia sa nespustí mikrofón, WebSocket ani Soniox session.</p>
+
+      <form id="loginForm" class="login-form">
+        <label for="accessCode">Prístupový kód</label>
+        <input id="accessCode" type="password" inputmode="text" autocomplete="current-password" placeholder="Zadaj kód" required>
+        <button class="primary-btn" type="submit">
+          <span class="btn-icon">●</span>
+          <span>Odomknúť aplikáciu</span>
+        </button>
+        <p id="loginStatus" class="status-text login-status" aria-live="polite"></p>
+      </form>
+    </section>
+  </main>
+
+  <main id="appShell" class="app-shell" hidden>
+    <section class="translator-card" aria-label="Živý hlasový prekladač">
+      <header class="app-header">
+        <div>
+          <p class="session-label">Prihlásený: <strong id="currentUser">—</strong></p>
+          <p id="usageInfo" class="usage-info">Denné limity sa načítavajú…</p>
+          <h1>Živý prekladač</h1>
+        </div>
+        <button id="logoutBtn" class="logout-btn" type="button">Odhlásiť</button>
+      </header>
+
+      <section class="language-panel" aria-label="Výber jazykov">
+        <div class="field language-field">
+          <label for="langA">Môj jazyk</label>
+          <select id="langA" autocomplete="off"></select>
+        </div>
+
+        <button id="swapBtn" class="swap-btn" type="button" aria-label="Vymeniť jazyky">⇄</button>
+
+        <div class="field language-field">
+          <label for="langB">Jazyk druhej osoby</label>
+          <select id="langB" autocomplete="off"></select>
+        </div>
+      </section>
+
+      <section class="settings-panel" aria-label="Nastavenia hlasu a odozvy">
+        <div class="field voice-field">
+          <label for="voiceSelect">Hlas pre hovorený preklad</label>
+          <select id="voiceSelect" autocomplete="off">
+            <option value="Adrian">Načítavam hlasy…</option>
+          </select>
+        </div>
+
+        <div class="field compact-field">
+          <label for="endpointDelay">Rýchlosť reakcie</label>
+          <select id="endpointDelay" autocomplete="off">
+            <option value="500" selected>Veľmi rýchla</option>
+            <option value="900">Vyvážená</option>
+            <option value="1500">Presnejšia</option>
+            <option value="2500">Najpokojnejšia</option>
+          </select>
+        </div>
+
+        <div class="field compact-field">
+          <label for="outputMode">Režim počúvania</label>
+          <select id="outputMode" autocomplete="off">
+            <option value="speaker" selected>Reproduktor · bezpečné stlmenie</option>
+            <option value="headphones">Slúchadlá · mikrofón beží ďalej</option>
+          </select>
+        </div>
+
+        <label class="toggle-card" for="voiceOutputToggle">
+          <input id="voiceOutputToggle" type="checkbox" checked>
+          <span class="toggle-title">Hovorený výstup</span>
+          <span class="toggle-switch" aria-hidden="true"><span></span></span>
+        </label>
+      </section>
+
+      <section class="action-panel">
+        <button id="startBtn" class="primary-btn" type="button">
+          <span class="btn-icon">●</span>
+          <span id="startBtnText">Spustiť konverzáciu</span>
+        </button>
+        <div class="meter" aria-hidden="true">
+          <div class="meter-bar" id="levelBar"></div>
+        </div>
+        <p id="status" class="status-text">Pripravený</p>
+        <div class="state-grid" aria-label="Stav aplikácie">
+          <span id="connectionChip" class="state-chip">Pripravené</span>
+          <span id="micChip" class="state-chip">Mikrofón vypnutý</span>
+          <span id="playbackChip" class="state-chip">Ticho</span>
+          <span id="modeChip" class="state-chip">Reproduktor</span>
+        </div>
+        <p id="latencyInfo" class="latency-info">Odozva: —</p>
+      </section>
+
+      <section class="transcript-grid" aria-label="Živý prepis a preklad">
+        <article class="transcript-card original-card">
+          <div class="card-toolbar">
+            <div>
+              <p class="card-kicker">Počul som</p>
+              <h2>Originál</h2>
+            </div>
+            <button id="copyOriginalBtn" class="icon-btn" type="button" title="Kopírovať originál" aria-label="Kopírovať originál">⧉</button>
+          </div>
+          <div id="originalText" class="text-content" aria-live="polite"></div>
+        </article>
+
+        <article class="transcript-card translation-card">
+          <div class="card-toolbar">
+            <div>
+              <p class="card-kicker">Preklad</p>
+              <h2>Výstup</h2>
+            </div>
+            <button id="copyTranslatedBtn" class="icon-btn" type="button" title="Kopírovať preklad" aria-label="Kopírovať preklad">⧉</button>
+          </div>
+          <div id="translatedText" class="text-content" aria-live="polite"></div>
+        </article>
+      </section>
+
+      <section class="utility-row">
+        <button id="repeatLastBtn" class="ghost-btn" type="button" disabled>Zopakovať hlas</button>
+        <button id="stopAudioBtn" class="ghost-btn" type="button">Stop audio</button>
+        <button id="textOnlyBtn" class="ghost-btn" type="button">Textový režim</button>
+        <button id="clearBtn" class="ghost-btn" type="button">Vymazať text</button>
+        <button id="copyAllBtn" class="ghost-btn" type="button">Kopírovať všetko</button>
+      </section>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
