@@ -125,7 +125,7 @@ function setChip(el, text, variant = 'idle') {
 
 function updateModeChip() {
   const mode = outputModeSelect?.value || 'speaker';
-  setChip(modeChip, mode === 'headphones' ? 'Slúchadlá' : 'Reproduktor', mode === 'headphones' ? 'info' : 'idle');
+  setChip(modeChip, mode === 'headphones' ? 'Slúchadlá · mikrofón aktívny' : 'Reproduktor · stlmenie pri TTS', mode === 'headphones' ? 'info' : 'idle');
 }
 
 function updateLatencyInfo(extra = {}) {
@@ -423,7 +423,7 @@ async function startMicrophone() {
       throw new Error('AudioWorklet nie je podporovaný v tomto prehliadači.');
     }
 
-    await audioContext.audioWorklet.addModule('/audio-capture-worklet.js?v=2.6.1');
+    await audioContext.audioWorklet.addModule('/audio-capture-worklet.js?v=2.7.0');
     audioWorkletNode = new AudioWorkletNode(audioContext, 'pcm-capture-processor', {
       numberOfInputs: 1,
       numberOfOutputs: 1,
@@ -623,7 +623,7 @@ function handleJsonMessage(msg) {
       break;
     case 'mute':
       isMuted = true;
-      setStatus('Prehrávam preklad…', 'speaking');
+      setStatus('Prehrávam preklad cez reproduktor… mikrofón je dočasne stlmený', 'speaking');
       setChip(playbackChip, 'Prehrávam', 'speaking');
       setChip(micChip, 'Stlmený počas TTS', 'idle');
       levelBar.style.width = '0%';

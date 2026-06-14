@@ -1,11 +1,12 @@
 {
   "name": "soniox-live-translator",
-  "version": "2.6.1",
-  "description": "Súkromný produkčný obojsmerný hlasový prekladač cez Soniox - final hardening v5.1",
+  "version": "2.7.0",
+  "description": "Súkromný produkčný obojsmerný hlasový prekladač cez Soniox - v6 production hardening",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check public/app.js && node --check public/audio-capture-worklet.js",
+    "check": "node --check server.js && node --check server-utils.js && node --check public/app.js && node --check public/audio-capture-worklet.js",
+    "test": "node --test",
     "audit": "npm audit --omit=dev"
   },
   "engines": {

@@ -1,10 +1,10 @@
-# Živý prekladač — produkčný Performance AudioWorklet v5
+# Živý prekladač — v6.0 production hardening
 
-Verzia: `2.6.1-production-final-hardening`
+Verzia: `2.7.0-v6-production-hardening`
 
-Toto je súkromná produkčná verzia webového hlasového prekladača cez Soniox. Nadväzuje na fázy 1–4 a pridáva výkonovejší spôsob snímania mikrofónu cez `AudioWorklet`.
+Súkromný produkčný webový hlasový prekladač cez Soniox pre private/family použitie. v6.0 je konzervatívna hardening verzia: nemení stabilný Soniox STT tok, nemení login/session model a ponecháva REST TTS ako predvolený a stabilný TTS transport.
 
-## Čo už obsahuje
+## Čo aplikácia obsahuje
 
 ### Fáza 1 — auth
 
@@ -38,30 +38,51 @@ Toto je súkromná produkčná verzia webového hlasového prekladača cez Sonio
 
 ### Fáza 5 — performance AudioWorklet
 
-- nový `public/audio-capture-worklet.js`,
-- moderný `AudioWorkletNode` ako primárny spôsob snímania mikrofónu,
+- `public/audio-capture-worklet.js`,
+- `AudioWorkletNode` ako primárny spôsob snímania mikrofónu,
 - fallback na `createScriptProcessor`, ak AudioWorklet nie je dostupný,
 - PCM chunk-y po 2048 vzorkách,
 - resampling výstupu na cieľových 16 kHz,
 - v UI vidíš, či ide `AudioWorklet` alebo fallback.
 
+### Fáza 5.1 — final hardening
+
+- bezpečnostné HTTP hlavičky,
+- chránený endpoint `/api/diagnostics`,
+- predvolený endpoint delay 500 ms,
+- čitateľnejšie usage hodnoty,
+- ochrana proti duplicitnému `playback_done`.
+
+### Fáza 6.0 — conservative production hardening
+
+- `.dockerignore` chráni aj `.env.*`, pričom `.env.example` ostáva bezpečný príklad,
+- jednotný release label `2.7.0-v6-production-hardening`,
+- verejný `/health` vracia iba minimálne bezpečné info,
+- detailné runtime info ostáva v `/api/diagnostics` za session,
+- diagnostika ukazuje aktuálny TTS transport a pripravené fallback counters,
+- session metrics obsahujú baseline timing pre tokeny, finálny preklad, TTS generovanie, `play_audio` a `playback_done`,
+- ľahký test harness cez Node built-in test runner bez nových dependencies,
+- drobný mobile UX polish pre jasnejší režim `Reproduktor` / `Slúchadlá`.
+
+## Dôležité produkčné rozhodnutia
+
+- REST TTS je stále predvolený transport.
+- Soniox TTS WebSocket nie je vo v6.0 primárny transport.
+- TTS WebSocket môže byť najskôr budúci v6.1 experiment za feature flagom a s REST fallbackom.
+- Soniox API key zostáva iba na backend-e.
+- Login/session, WebSocket auth, origin check, security headers a usage limity ostávajú zachované.
+- Denné kvóty a sessions sú stále in-memory a po reštarte Fly Machine sa vynulujú. To je akceptované pre private/family použitie, nie pre verejný multi-user SaaS.
+
 ## Lokálne spustenie
 
-Vytvor `.env` podľa `.env.example`:
-
-```env
-SONIOX_API_KEY=tvoj_soniox_api_kluc
-SONIOX_REGION=eu
-APP_ACCESS_CODES=fero:123456,brat:654321
-SESSION_SECRET=aspon_32_znakov_dlhy_nahodny_secret_123456
-SONIOX_FINALIZE_TIMEOUT_SECONDS=4
-```
+Vytvor `.env` podľa `.env.example`. Použi vlastné hodnoty, nikdy necommituj reálne secrets.
 
 Potom:
 
 ```powershell
 npm install
 npm run check
+npm test
 npm run audit
 npm start
 ```
@@ -72,67 +93,83 @@ Otvor:
 http://localhost:3000
 ```
 
-## Fly.io deployment
+## Diagnostika
 
-Secrets:
+Verejný health endpoint je zámerne minimálny:
 
-```powershell
-fly secrets set SONIOX_API_KEY="tvoj_soniox_api_kluc" -a soniox-prekladac
-fly secrets set SONIOX_REGION="eu" -a soniox-prekladac
-fly secrets set APP_ACCESS_CODES="fero:TVOJ_KOD,brat:BRATOV_KOD" -a soniox-prekladac
-fly secrets set SESSION_SECRET="aspon_32_znakov_dlhy_nahodny_secret" -a soniox-prekladac
-fly secrets set SONIOX_FINALIZE_TIMEOUT_SECONDS="4" -a soniox-prekladac
+```txt
+/health
 ```
 
-Deploy:
+Po prihlásení môžeš v tom istom prehliadači otvoriť detailnú diagnostiku:
+
+```txt
+/api/diagnostics
+```
+
+Diagnostika obsahuje bezpečné runtime informácie pre owner debugging vrátane:
+
+- verzie aplikácie,
+- Fly runtime identifikátorov,
+- Soniox regiónov/hostov,
+- aktuálneho TTS transportu (`rest`),
+- fallback counters pripravených pre budúce experimenty,
+- usage snapshotu,
+- security flags.
+
+## Testovanie
+
+Syntax check:
+
+```powershell
+npm run check
+```
+
+Node built-in test runner:
+
+```powershell
+npm test
+```
+
+Aktuálne testy pokrývajú čisté helper funkcie pre normalizáciu vstupov a TTS chunkovanie.
+
+## Fly.io deployment
+
+Deployment sa nerobí automaticky. Pred nasadením musí prejsť:
+
+```powershell
+npm run check
+npm test
+npm run audit
+```
+
+Nasadenie na Fly rob iba po explicitnom schválení ownera:
 
 ```powershell
 fly deploy -a soniox-prekladac
 ```
 
-Logy:
-
-```powershell
-fly logs -a soniox-prekladac
-```
-
 ## Kontrolný checklist po nasadení
 
 1. Login funguje a bez loginu sa nedostaneš do aplikácie.
-2. Po štarte konverzácie vidíš `Počúvam… môžeš hovoriť (AudioWorklet)`.
-3. Ak prehliadač AudioWorklet nepodporuje, aplikácia má ukázať fallback a stále fungovať.
-4. Preklad funguje v režime `Reproduktor` aj `Slúchadlá`.
-5. `Textový režim` vypne hovorený výstup a šetrí TTS requesty.
-6. `Zopakovať hlas` prehrá posledné prijaté audio bez ďalšieho Soniox TTS requestu.
-7. Pri stopnutí vidíš `Dokončujem posledné slová…`.
-8. `npm run check` musí prejsť bez syntax chyby.
+2. Po štarte konverzácie vidíš `Počúvam… môžeš hovoriť (AudioWorklet)` alebo fallback audio.
+3. Preklad funguje v režime `Reproduktor` aj `Slúchadlá`.
+4. V režime `Reproduktor` sa mikrofón počas hovoreného prekladu stlmí.
+5. V režime `Slúchadlá` mikrofón zostáva aktívny; používaj ho iba so slúchadlami.
+6. `Textový režim` vypne hovorený výstup a šetrí TTS requesty.
+7. `Zopakovať hlas` prehrá posledné prijaté audio bez ďalšieho Soniox TTS requestu.
+8. Pri stopnutí vidíš `Dokončujem posledné slová…`.
+9. `/health` vracia iba minimálne bezpečné info.
+10. `/api/diagnostics` je dostupné iba po prihlásení.
+11. `npm run check` a `npm test` prešli pred deployom.
 
-## Dôležité
+## Stabilné časti, ktoré netreba meniť bez dôvodu
 
-- Fáza 5 nemení Soniox API kľúče ani login model.
-- Denné kvóty sú stále in-memory a po reštarte Fly Machine sa vynulujú.
-- REST TTS ostáva zámerne zachovaný, aby sa v tejto fáze nemenilo príliš veľa naraz.
-- TTS WebSocket bude samostatná ďalšia fáza.
-
-
-## Fáza 5.1 — final hardening
-
-Táto verzia pridáva bezpečnostné HTTP hlavičky, `/api/diagnostics`, predvolený endpoint delay 500 ms, čitateľnejšie usage hodnoty a ochranu proti duplicitnému `playback_done`.
-
-### Diagnostika po deployi
-
-Po prihlásení môžeš v prehliadači alebo cez PowerShell overiť:
-
-```powershell
-Invoke-WebRequest "https://soniox-prekladac.fly.dev/api/diagnostics" -UseBasicParsing -WebSession $session
-```
-
-Jednoduchšie je otvoriť aplikáciu v prehliadači, prihlásiť sa a potom v tom istom prehliadači otvoriť:
-
-```txt
-https://soniox-prekladac.fly.dev/api/diagnostics
-```
-
-### Fly režim
-
-`fly.toml` má `min_machines_running = 1`, čo je vhodné po pridaní platobnej karty, aby prvý request nemusel čakať na cold start.
+- REST TTS default a fallback,
+- speaker-mode microphone mute,
+- login/session,
+- WebSocket session protection,
+- origin check,
+- security HTTP headers,
+- usage limity,
+- Soniox STT flow.

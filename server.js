@@ -5,8 +5,20 @@ const http = require("http");
 const WebSocket = require("ws");
 const { performance } = require("perf_hooks");
 const crypto = require("crypto");
+const {
+  bytesLength,
+  chunkTextForTts,
+  formatKb,
+  formatMb,
+  normalizeBoolean,
+  normalizeEndpointDelay,
+  normalizeLanguageCode,
+  normalizeOutputMode,
+  normalizeVoiceId,
+} = require("./server-utils");
 
-const APP_VERSION = "2.6.1-production-final-hardening";
+const APP_VERSION = "2.7.0-v6-production-hardening";
+const TTS_TRANSPORT = "rest";
 
 const SONIOX_REGION = String(process.env.SONIOX_REGION || "eu")
   .trim()
@@ -252,6 +264,11 @@ const FALLBACK_TTS_VOICES = [
 let cachedTtsVoices = null;
 let cachedTtsVoicesAt = 0;
 let cachedTtsModelId = "tts-rt-v1";
+const runtimeCounters = {
+  ttsRestFallbacks: 0,
+  ttsWsFailures: 0,
+  ttsTransportSwitches: 0,
+};
 
 const app = express();
 const server = http.createServer(app);
@@ -309,21 +326,6 @@ function elapsedMs(startedAt) {
   return Math.round(performance.now() - startedAt);
 }
 
-function bytesLength(data) {
-  if (!data) return 0;
-  if (typeof data.length === "number") return data.length;
-  if (typeof data.byteLength === "number") return data.byteLength;
-  return 0;
-}
-
-function formatKb(bytes) {
-  return Math.round((Number(bytes || 0) / 1024) * 10) / 10;
-}
-
-function formatMb(bytes) {
-  return Math.round((Number(bytes || 0) / 1024 / 1024) * 10) / 10;
-}
-
 function isStreamMarker(text) {
   return text === "<end>" || text === "<fin>";
 }
@@ -344,46 +346,6 @@ function safeSendJson(ws, payload) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(payload));
   }
-}
-
-function normalizeLanguageCode(code) {
-  if (!code || typeof code !== "string") return "";
-  return code
-    .trim()
-    .split("-")[0]
-    .toLowerCase()
-    .replace(/[^a-z]/g, "")
-    .slice(0, 8);
-}
-
-function normalizeVoiceId(voice) {
-  if (!voice || typeof voice !== "string") return "Adrian";
-  const cleaned = voice
-    .trim()
-    .replace(/[^a-zA-Z0-9._\- ]/g, "")
-    .slice(0, 50);
-  return cleaned || "Adrian";
-}
-
-function normalizeBoolean(value, fallback = true) {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    const lower = value.toLowerCase();
-    if (["true", "1", "yes", "on"].includes(lower)) return true;
-    if (["false", "0", "no", "off"].includes(lower)) return false;
-  }
-  return fallback;
-}
-
-function normalizeEndpointDelay(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return 500;
-  return Math.max(500, Math.min(3000, Math.round(number)));
-}
-
-function normalizeOutputMode(value) {
-  const mode = String(value || "speaker").trim().toLowerCase();
-  return mode === "headphones" ? "headphones" : "speaker";
 }
 
 function parseAccessCodes() {
@@ -415,6 +377,7 @@ const activeWsByUser = new Map();
 const activeWsByIp = new Map();
 const usageByUser = new Map();
 const previewRateByUser = new Map();
+const lastSessionSummaryByUser = new Map();
 let activeWsTotal = 0;
 
 if (!ACCESS_USERS.length) {
@@ -695,27 +658,6 @@ function truncateText(text, maxLength = MAX_TEXT_CHARS) {
   return value.slice(value.length - maxLength);
 }
 
-function chunkTextForTts(text, maxLength = MAX_TTS_CHARS) {
-  const clean = String(text || "").trim();
-  if (clean.length <= maxLength) return [clean].filter(Boolean);
-  const chunks = [];
-  let remaining = clean;
-  while (remaining.length > maxLength) {
-    let splitAt = Math.max(
-      remaining.lastIndexOf(". ", maxLength),
-      remaining.lastIndexOf("! ", maxLength),
-      remaining.lastIndexOf("? ", maxLength),
-      remaining.lastIndexOf(", ", maxLength),
-      remaining.lastIndexOf(" ", maxLength)
-    );
-    if (splitAt < Math.floor(maxLength * 0.45)) splitAt = maxLength;
-    chunks.push(remaining.slice(0, splitAt + 1).trim());
-    remaining = remaining.slice(splitAt + 1).trim();
-  }
-  if (remaining) chunks.push(remaining);
-  return chunks.filter(Boolean).slice(0, 4);
-}
-
 function normalizeVoiceList(modelsResponse) {
   const models = Array.isArray(modelsResponse?.models)
     ? modelsResponse.models
@@ -808,13 +750,7 @@ async function synthesizeSpeechBuffer({ text, language, voice }) {
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    version: APP_VERSION,
-    configuredSonioxRegion: SONIOX_REGION,
-    sonioxRegion: inferSonioxRegion(),
-    sonioxSttHost: endpointHost(SONIOX_STT_URL),
-    sonioxTtsHost: endpointHost(SONIOX_TTS_REST_URL),
-    activeWsTotal,
-    maxActiveWsTotal: MAX_ACTIVE_WS_TOTAL,
+    status: "ok",
   });
 });
 
@@ -885,6 +821,18 @@ app.get("/api/diagnostics", requireSession, (req, res) => {
       stt_model: "stt-rt-v4",
       tts_model: cachedTtsModelId || "tts-rt-v1",
     },
+    tts: {
+      transport: TTS_TRANSPORT,
+      default_transport: "rest",
+      rest_fallback_available: true,
+      websocket_primary: false,
+      websocket_experiment_enabled: false,
+      counters: {
+        rest_fallbacks: runtimeCounters.ttsRestFallbacks,
+        websocket_failures: runtimeCounters.ttsWsFailures,
+        transport_switches: runtimeCounters.ttsTransportSwitches,
+      },
+    },
     runtime: {
       active_ws_total: activeWsTotal,
       active_ws_for_user: activeWsByUser.has(username),
@@ -893,6 +841,7 @@ app.get("/api/diagnostics", requireSession, (req, res) => {
       default_endpoint_delay_ms: 500,
       audio_capture: "AudioWorklet preferred, ScriptProcessor fallback",
     },
+    last_session_summary: lastSessionSummaryByUser.get(username) || null,
     limits: {
       max_session_minutes: Math.round(MAX_SESSION_MS / 60000),
       max_audio_mb_per_session: Math.round(MAX_AUDIO_BYTES_PER_SESSION / 1024 / 1024),
@@ -1050,6 +999,11 @@ wss.on("connection", (clientWs, req) => {
     firstTtsScheduledAt: null,
     firstTtsStartedAt: null,
     firstTtsReadyAt: null,
+    firstPlayAudioSentAt: null,
+    firstPlaybackDoneAt: null,
+    firstTtsGenerationMs: null,
+    lastTtsGenerationMs: null,
+    lastFailureReason: null,
     audioChunks: 0,
     audioBytes: 0,
     sonioxMessages: 0,
@@ -1061,6 +1015,9 @@ wss.on("connection", (clientWs, req) => {
     endpointMarkers: 0,
     ttsRequests: 0,
     ttsAudioBytes: 0,
+    playAudioSent: 0,
+    playbackDone: 0,
+    ttsErrors: 0,
   };
 
   function metricPayload(extra = {}) {
@@ -1098,8 +1055,12 @@ wss.on("connection", (clientWs, req) => {
   }
 
   function getMetricsSummary() {
+    const firstTokenAt = [metrics.firstOriginalTokenAt, metrics.firstTranslationTokenAt]
+      .filter(Boolean)
+      .sort((a, b) => a - b)[0] || null;
     return {
       duration_ms: elapsedMs(sessionStartedAt),
+      tts_transport: TTS_TRANSPORT,
       soniox_region: inferSonioxRegion(),
       soniox_stt_host: endpointHost(SONIOX_STT_URL),
       audio_chunks: metrics.audioChunks,
@@ -1113,13 +1074,22 @@ wss.on("connection", (clientWs, req) => {
       endpoint_markers: metrics.endpointMarkers,
       tts_requests: metrics.ttsRequests,
       tts_audio_kb: formatKb(metrics.ttsAudioBytes),
+      play_audio_sent: metrics.playAudioSent,
+      playback_done: metrics.playbackDone,
+      tts_errors: metrics.ttsErrors,
+      failure_reason: metrics.lastFailureReason,
       first_audio_ms: sinceSessionStart(metrics.firstAudioAt),
+      first_token_ms: sinceSessionStart(firstTokenAt),
       first_soniox_message_ms: sinceSessionStart(metrics.firstSonioxMessageAt),
       first_original_token_ms: sinceSessionStart(metrics.firstOriginalTokenAt),
       first_translation_token_ms: sinceSessionStart(metrics.firstTranslationTokenAt),
       first_final_original_ms: sinceSessionStart(metrics.firstFinalOriginalAt),
       first_final_translation_ms: sinceSessionStart(metrics.firstFinalTranslationAt),
       first_tts_ready_ms: sinceSessionStart(metrics.firstTtsReadyAt),
+      first_play_audio_sent_ms: sinceSessionStart(metrics.firstPlayAudioSentAt),
+      first_playback_done_ms: sinceSessionStart(metrics.firstPlaybackDoneAt),
+      first_tts_generation_ms: metrics.firstTtsGenerationMs,
+      last_tts_generation_ms: metrics.lastTtsGenerationMs,
     };
   }
 
@@ -1479,6 +1449,7 @@ wss.on("connection", (clientWs, req) => {
     if (sessionFinished) return;
     sessionFinished = true;
     acceptAudio = false;
+    metrics.lastFailureReason = reason;
 
     if (sonioxFinalizeTimer) {
       clearTimeout(sonioxFinalizeTimer);
@@ -1492,9 +1463,12 @@ wss.on("connection", (clientWs, req) => {
     clearPendingTtsTimer();
     ttsQueue = [];
 
+    const summary = getMetricsSummary();
+    lastSessionSummaryByUser.set(authSession.username, summary);
+
     logMetric("client_session_completed", {
       reason,
-      summary: getMetricsSummary(),
+      summary,
       dropped_early_audio_chunks: droppedEarlyAudioChunks,
       blocked_until_ready_chunks: blockedUntilReadyChunks,
       blocked_during_tts_chunks: blockedDuringTtsChunks,
@@ -1505,7 +1479,7 @@ wss.on("connection", (clientWs, req) => {
     safeSendJson(clientWs, {
       type: "session_finished",
       reason,
-      summary: getMetricsSummary(),
+      summary,
     });
 
     setTimeout(() => {
@@ -1865,7 +1839,7 @@ wss.on("connection", (clientWs, req) => {
       return;
     }
 
-    const chunks = chunkTextForTts(text);
+    const chunks = chunkTextForTts(text, MAX_TTS_CHARS);
     for (const chunk of chunks) {
       if (ttsQueue.length >= MAX_TTS_QUEUE) {
         ttsQueue.shift();
@@ -1965,12 +1939,17 @@ wss.on("connection", (clientWs, req) => {
       }
       metrics.ttsAudioBytes += audioBuffer.length;
       addUsage(authSession.username, { ttsAudioBytes: audioBuffer.length });
+      const generationMs = elapsedMs(ttsStartedAt);
       if (!metrics.firstTtsReadyAt) {
         metrics.firstTtsReadyAt = performance.now();
       }
+      if (metrics.firstTtsGenerationMs === null) {
+        metrics.firstTtsGenerationMs = generationMs;
+      }
+      metrics.lastTtsGenerationMs = generationMs;
       logMetric("tts_audio_ready", {
         tts_request_id: ttsRequestId,
-        generation_ms: elapsedMs(ttsStartedAt),
+        generation_ms: generationMs,
         audio_bytes: audioBuffer.length,
         audio_kb: formatKb(audioBuffer.length),
         language: next.language,
@@ -1986,8 +1965,14 @@ wss.on("connection", (clientWs, req) => {
         voice: next.voice,
         language: next.language,
         tts_request_id: ttsRequestId,
-        generation_ms: elapsedMs(ttsStartedAt),
+        generation_ms: generationMs,
         output_mode: outputMode,
+      });
+      metrics.playAudioSent += 1;
+      recordFirstMetric("firstPlayAudioSentAt", "first_play_audio_sent", {
+        tts_request_id: ttsRequestId,
+        generation_ms: generationMs,
+        audio_bytes: audioBuffer.length,
       });
 
       if (clientWs.readyState === WebSocket.OPEN) {
@@ -2005,6 +1990,7 @@ wss.on("connection", (clientWs, req) => {
         }, TTS_PLAYBACK_TIMEOUT_MS);
       }
     } catch (err) {
+      metrics.ttsErrors += 1;
       logMetric("tts_error", {
         tts_request_id: ttsRequestId,
         message: err?.message || String(err),
@@ -2041,6 +2027,12 @@ wss.on("connection", (clientWs, req) => {
       ttsInFlight = false;
     }
 
+    metrics.playbackDone += 1;
+    recordFirstMetric("firstPlaybackDoneAt", "first_playback_done", {
+      queue_remaining: ttsQueue.length,
+      output_mode: outputMode,
+    });
+
     logMetric("tts_playback_done", {
       queue_remaining: ttsQueue.length,
       tts_enabled: ttsEnabled,
@@ -2066,6 +2058,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(
     `[metrics] server_start ${JSON.stringify({
       version: APP_VERSION,
+      tts_transport: TTS_TRANSPORT,
       soniox_region: inferSonioxRegion(),
       soniox_stt_url: SONIOX_STT_URL,
       soniox_tts_url: SONIOX_TTS_REST_URL,

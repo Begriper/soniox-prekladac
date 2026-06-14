@@ -101,6 +101,14 @@ label {
   font-weight: 850;
 }
 
+.field-help {
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
 select, input {
   width: 100%;
   min-height: 56px;
@@ -326,6 +334,7 @@ select:disabled, input:disabled, button:disabled {
 
 .utility-row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
   margin-top: 16px;
@@ -548,10 +557,6 @@ select:disabled, input:disabled, button:disabled {
   text-align: center;
 }
 
-.utility-row {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-}
-
 @media (max-width: 860px) {
   .settings-panel {
     grid-template-columns: 1fr 1fr;
@@ -560,14 +565,21 @@ select:disabled, input:disabled, button:disabled {
     grid-template-columns: 1fr 1fr;
   }
   .utility-row {
-    grid-template-columns: 1fr 1fr;
+    justify-content: stretch;
   }
 }
 
 @media (max-width: 560px) {
   .settings-panel,
-  .state-grid,
-  .utility-row {
+  .state-grid {
     grid-template-columns: 1fr;
+  }
+
+  .utility-row {
+    flex-direction: column;
+  }
+
+  .ghost-btn {
+    width: 100%;
   }
 }
