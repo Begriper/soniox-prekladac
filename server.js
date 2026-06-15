@@ -14,6 +14,8 @@ const {
   normalizeEndpointDelay,
   normalizeLanguageCode,
   normalizeOutputMode,
+  normalizeSttLanguageList,
+  normalizeTtsVoiceList,
   normalizeVoiceId,
 } = require("./server-utils");
 
@@ -28,12 +30,14 @@ const SONIOX_REGION_ENDPOINTS = {
   us: {
     stt: "wss://stt-rt.soniox.com/transcribe-websocket",
     tts: "https://tts-rt.soniox.com/tts",
-    models: "https://api.soniox.com/v1/tts-models",
+    sttModels: "https://api.soniox.com/v1/models",
+    ttsModels: "https://api.soniox.com/v1/tts-models",
   },
   eu: {
     stt: "wss://stt-rt.eu.soniox.com/transcribe-websocket",
     tts: "https://tts-rt.eu.soniox.com/tts",
-    models: "https://api.eu.soniox.com/v1/tts-models",
+    sttModels: "https://api.eu.soniox.com/v1/models",
+    ttsModels: "https://api.eu.soniox.com/v1/tts-models",
   },
 };
 
@@ -50,8 +54,10 @@ const SONIOX_STT_URL =
   process.env.SONIOX_STT_URL || SELECTED_SONIOX_ENDPOINTS.stt;
 const SONIOX_TTS_REST_URL =
   process.env.SONIOX_TTS_REST_URL || SELECTED_SONIOX_ENDPOINTS.tts;
+const SONIOX_STT_MODELS_URL =
+  process.env.SONIOX_STT_MODELS_URL || SELECTED_SONIOX_ENDPOINTS.sttModels;
 const SONIOX_TTS_MODELS_URL =
-  process.env.SONIOX_TTS_MODELS_URL || SELECTED_SONIOX_ENDPOINTS.models;
+  process.env.SONIOX_TTS_MODELS_URL || SELECTED_SONIOX_ENDPOINTS.ttsModels;
 const PORT = process.env.PORT || 3000;
 
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
@@ -89,6 +95,48 @@ if (!process.env.SONIOX_API_KEY) {
   console.error("CHYBA: Premenná prostredia SONIOX_API_KEY nie je nastavená.");
   process.exit(1);
 }
+
+const FALLBACK_STT_LANGUAGES = [
+  { code: "af", name: "Afrikaans" },
+  { code: "ar", name: "Arabic" },
+  { code: "bn", name: "Bengali" },
+  { code: "bg", name: "Bulgarian" },
+  { code: "ca", name: "Catalan" },
+  { code: "zh", name: "Chinese" },
+  { code: "hr", name: "Croatian" },
+  { code: "cs", name: "Czech" },
+  { code: "da", name: "Danish" },
+  { code: "nl", name: "Dutch" },
+  { code: "en", name: "English" },
+  { code: "et", name: "Estonian" },
+  { code: "fi", name: "Finnish" },
+  { code: "fr", name: "French" },
+  { code: "de", name: "German" },
+  { code: "el", name: "Greek" },
+  { code: "he", name: "Hebrew" },
+  { code: "hi", name: "Hindi" },
+  { code: "hu", name: "Hungarian" },
+  { code: "id", name: "Indonesian" },
+  { code: "it", name: "Italian" },
+  { code: "ja", name: "Japanese" },
+  { code: "ko", name: "Korean" },
+  { code: "lv", name: "Latvian" },
+  { code: "lt", name: "Lithuanian" },
+  { code: "no", name: "Norwegian" },
+  { code: "pl", name: "Polish" },
+  { code: "pt", name: "Portuguese" },
+  { code: "ro", name: "Romanian" },
+  { code: "ru", name: "Russian" },
+  { code: "sr", name: "Serbian" },
+  { code: "sk", name: "Slovak" },
+  { code: "sl", name: "Slovenian" },
+  { code: "es", name: "Spanish" },
+  { code: "sv", name: "Swedish" },
+  { code: "th", name: "Thai" },
+  { code: "tr", name: "Turkish" },
+  { code: "uk", name: "Ukrainian" },
+  { code: "vi", name: "Vietnamese" },
+];
 
 const FALLBACK_TTS_VOICES = [
   {
@@ -264,6 +312,10 @@ const FALLBACK_TTS_VOICES = [
 let cachedTtsVoices = null;
 let cachedTtsVoicesAt = 0;
 let cachedTtsModelId = "tts-rt-v1";
+let cachedSttLanguages = null;
+let cachedSttLanguagesAt = 0;
+let cachedSttModelId = "stt-rt-v4";
+let cachedSttLanguagesFallback = false;
 const runtimeCounters = {
   ttsRestFallbacks: 0,
   ttsWsFailures: 0,
@@ -659,38 +711,43 @@ function truncateText(text, maxLength = MAX_TEXT_CHARS) {
 }
 
 function normalizeVoiceList(modelsResponse) {
-  const models = Array.isArray(modelsResponse?.models)
-    ? modelsResponse.models
-    : Array.isArray(modelsResponse)
-    ? modelsResponse
-    : [];
+  const { voices, modelId } = normalizeTtsVoiceList(modelsResponse, "tts-rt-v1");
+  if (modelId) cachedTtsModelId = modelId;
+  return voices.length ? voices : FALLBACK_TTS_VOICES;
+}
 
-  const preferredModel =
-    models.find((model) => model?.id === "tts-rt-v1") ||
-    models.find(
-      (model) => Array.isArray(model?.voices) && model.voices.length > 0
-    ) ||
-    models[0];
+async function fetchSttLanguages() {
+  const now = Date.now();
+  if (
+    cachedSttLanguages &&
+    !cachedSttLanguagesFallback &&
+    now - cachedSttLanguagesAt < 10 * 60 * 1000
+  ) {
+    return cachedSttLanguages;
+  }
 
-  if (preferredModel?.id) cachedTtsModelId = preferredModel.id;
+  const response = await fetch(SONIOX_STT_MODELS_URL, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${process.env.SONIOX_API_KEY}`,
+    },
+  });
 
-  const voices = Array.isArray(preferredModel?.voices)
-    ? preferredModel.voices
-    : [];
-  const normalized = voices
-    .map((voice) => {
-      const id = voice?.id || voice?.name || voice?.voice;
-      if (!id) return null;
-      return {
-        id: normalizeVoiceId(id),
-        name: String(voice?.name || id),
-        gender: String(voice?.gender || "neutral").toLowerCase(),
-        description: String(voice?.description || ""),
-      };
-    })
-    .filter(Boolean);
+  if (!response.ok) {
+    throw new Error(`Soniox STT models HTTP ${response.status}`);
+  }
 
-  return normalized.length ? normalized : FALLBACK_TTS_VOICES;
+  const data = await response.json();
+  const { languages, modelId } = normalizeSttLanguageList(data, "stt-rt-v4");
+  if (!languages.length) {
+    throw new Error("Soniox STT models response did not include languages");
+  }
+
+  cachedSttLanguages = languages;
+  cachedSttLanguagesAt = now;
+  cachedSttModelId = modelId || "stt-rt-v4";
+  cachedSttLanguagesFallback = false;
+  return cachedSttLanguages;
 }
 
 async function fetchTtsVoices() {
@@ -817,8 +874,14 @@ app.get("/api/diagnostics", requireSession, (req, res) => {
       inferred_region: inferSonioxRegion(),
       stt_host: endpointHost(SONIOX_STT_URL),
       tts_host: endpointHost(SONIOX_TTS_REST_URL),
+      stt_models_host: endpointHost(SONIOX_STT_MODELS_URL),
       tts_models_host: endpointHost(SONIOX_TTS_MODELS_URL),
       stt_model: "stt-rt-v4",
+      stt_languages_model: cachedSttModelId || "stt-rt-v4",
+      stt_languages_count: Array.isArray(cachedSttLanguages)
+        ? cachedSttLanguages.length
+        : 0,
+      stt_languages_fallback: Boolean(cachedSttLanguagesFallback),
       tts_model: cachedTtsModelId || "tts-rt-v1",
     },
     tts: {
@@ -884,6 +947,24 @@ app.post("/api/logout", (req, res) => {
   if (session) destroySession(session.id);
   res.setHeader("Set-Cookie", clearSessionCookie());
   res.json({ ok: true });
+});
+
+app.get("/api/languages", requireSession, async (req, res) => {
+  try {
+    const languages = await fetchSttLanguages();
+    res.json({ languages, model: cachedSttModelId, fallback: false });
+  } catch (err) {
+    console.error("Nepodarilo sa načítať Soniox STT jazyky:", err);
+    cachedSttLanguages = FALLBACK_STT_LANGUAGES;
+    cachedSttLanguagesAt = Date.now();
+    cachedSttModelId = cachedSttModelId || "stt-rt-v4";
+    cachedSttLanguagesFallback = true;
+    res.json({
+      languages: FALLBACK_STT_LANGUAGES,
+      model: cachedSttModelId,
+      fallback: true,
+    });
+  }
 });
 
 app.get("/api/voices", requireSession, async (req, res) => {
@@ -2061,6 +2142,7 @@ server.listen(PORT, "0.0.0.0", () => {
       tts_transport: TTS_TRANSPORT,
       soniox_region: inferSonioxRegion(),
       soniox_stt_url: SONIOX_STT_URL,
+      soniox_stt_models_url: SONIOX_STT_MODELS_URL,
       soniox_tts_url: SONIOX_TTS_REST_URL,
       soniox_tts_models_url: SONIOX_TTS_MODELS_URL,
     })}`

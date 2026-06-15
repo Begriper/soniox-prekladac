@@ -1,43 +1,43 @@
-const LANGUAGES = [
-  { code: 'sk', name: 'Slovak' },
-  { code: 'de', name: 'German' },
-  { code: 'en', name: 'English' },
-  { code: 'pl', name: 'Polish' },
-  { code: 'cs', name: 'Czech' },
-  { code: 'uk', name: 'Ukrainian' },
-  { code: 'ru', name: 'Russian' },
-  { code: 'hu', name: 'Hungarian' },
-  { code: 'fr', name: 'French' },
-  { code: 'es', name: 'Spanish' },
-  { code: 'it', name: 'Italian' },
-  { code: 'pt', name: 'Portuguese' },
-  { code: 'nl', name: 'Dutch' },
-  { code: 'sv', name: 'Swedish' },
-  { code: 'da', name: 'Danish' },
-  { code: 'no', name: 'Norwegian' },
-  { code: 'fi', name: 'Finnish' },
-  { code: 'ro', name: 'Romanian' },
-  { code: 'bg', name: 'Bulgarian' },
-  { code: 'el', name: 'Greek' },
-  { code: 'tr', name: 'Turkish' },
+const FALLBACK_LANGUAGES = [
+  { code: 'af', name: 'Afrikaans' },
   { code: 'ar', name: 'Arabic' },
+  { code: 'bn', name: 'Bengali' },
+  { code: 'bg', name: 'Bulgarian' },
+  { code: 'ca', name: 'Catalan' },
+  { code: 'zh', name: 'Chinese' },
+  { code: 'hr', name: 'Croatian' },
+  { code: 'cs', name: 'Czech' },
+  { code: 'da', name: 'Danish' },
+  { code: 'nl', name: 'Dutch' },
+  { code: 'en', name: 'English' },
+  { code: 'et', name: 'Estonian' },
+  { code: 'fi', name: 'Finnish' },
+  { code: 'fr', name: 'French' },
+  { code: 'de', name: 'German' },
+  { code: 'el', name: 'Greek' },
   { code: 'he', name: 'Hebrew' },
   { code: 'hi', name: 'Hindi' },
-  { code: 'bn', name: 'Bengali' },
+  { code: 'hu', name: 'Hungarian' },
   { code: 'id', name: 'Indonesian' },
-  { code: 'vi', name: 'Vietnamese' },
-  { code: 'th', name: 'Thai' },
-  { code: 'ko', name: 'Korean' },
+  { code: 'it', name: 'Italian' },
   { code: 'ja', name: 'Japanese' },
-  { code: 'zh', name: 'Chinese' },
-  { code: 'af', name: 'Afrikaans' },
-  { code: 'ca', name: 'Catalan' },
-  { code: 'hr', name: 'Croatian' },
-  { code: 'et', name: 'Estonian' },
+  { code: 'ko', name: 'Korean' },
   { code: 'lv', name: 'Latvian' },
   { code: 'lt', name: 'Lithuanian' },
+  { code: 'no', name: 'Norwegian' },
+  { code: 'pl', name: 'Polish' },
+  { code: 'pt', name: 'Portuguese' },
+  { code: 'ro', name: 'Romanian' },
+  { code: 'ru', name: 'Russian' },
+  { code: 'sr', name: 'Serbian' },
+  { code: 'sk', name: 'Slovak' },
   { code: 'sl', name: 'Slovenian' },
-  { code: 'sr', name: 'Serbian' }
+  { code: 'es', name: 'Spanish' },
+  { code: 'sv', name: 'Swedish' },
+  { code: 'th', name: 'Thai' },
+  { code: 'tr', name: 'Turkish' },
+  { code: 'uk', name: 'Ukrainian' },
+  { code: 'vi', name: 'Vietnamese' }
 ];
 
 const FALLBACK_VOICES = [
@@ -45,6 +45,7 @@ const FALLBACK_VOICES = [
   { id: 'Maya', name: 'Maya', gender: 'female' }
 ];
 
+let availableLanguages = FALLBACK_LANGUAGES;
 
 const loginShell = document.getElementById('loginShell');
 const loginForm = document.getElementById('loginForm');
@@ -154,7 +155,7 @@ function updateModeChip() {
 function selectedLanguageName(select) {
   if (!select) return '';
   if (select.value === 'auto') return 'Auto';
-  const match = LANGUAGES.find((lang) => lang.code === select.value);
+  const match = availableLanguages.find((lang) => lang.code === select.value);
   return match?.name || select.selectedOptions?.[0]?.textContent || '';
 }
 
@@ -338,6 +339,60 @@ async function fetchJson(url, options = {}) {
   return data;
 }
 
+function readableLanguageName(code) {
+  const cleanCode = String(code || '').trim().toLowerCase();
+  if (!cleanCode) return '';
+  try {
+    const displayNames = new Intl.DisplayNames(['en'], { type: 'language' });
+    const displayName = displayNames.of(cleanCode);
+    if (displayName && displayName !== cleanCode) return displayName;
+  } catch (err) {
+    // Browser fallback for older engines without Intl.DisplayNames.
+  }
+  return cleanCode.toUpperCase();
+}
+
+function normalizeLanguageOptions(languages) {
+  const deduped = new Map();
+  if (!Array.isArray(languages)) return [];
+
+  languages.forEach((language) => {
+    const rawCode = typeof language === 'string'
+      ? language
+      : language?.code || language?.language_code || language?.language || language?.id || '';
+    const rawName = typeof language === 'object' && language
+      ? language.name || language.display_name || language.label || language.language_name || ''
+      : '';
+    const code = String(rawCode || '').trim().toLowerCase();
+    if (!code || deduped.has(code)) return;
+    const name = String(rawName || readableLanguageName(code)).trim();
+    deduped.set(code, { code, name: name || code.toUpperCase() });
+  });
+
+  return Array.from(deduped.values()).sort(
+    (a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }) || a.code.localeCompare(b.code, 'en')
+  );
+}
+
+function hasAvailableLanguage(code) {
+  const cleanCode = String(code || '').trim().toLowerCase();
+  return availableLanguages.some((language) => language.code === cleanCode);
+}
+
+function pickAvailableLanguage(preferredCodes = []) {
+  for (const code of preferredCodes) {
+    const cleanCode = String(code || '').trim().toLowerCase();
+    if (hasAvailableLanguage(cleanCode)) return cleanCode;
+  }
+  return availableLanguages[0]?.code || '';
+}
+
+function resolveStoredLanguage(storedLanguage, fallbackCodes = []) {
+  const cleanCode = String(storedLanguage || '').trim().toLowerCase();
+  if (hasAvailableLanguage(cleanCode)) return cleanCode;
+  return pickAvailableLanguage(fallbackCodes);
+}
+
 function populateSelect(select, selected, options = {}) {
   const { includeAuto = false } = options;
   select.innerHTML = '';
@@ -350,7 +405,7 @@ function populateSelect(select, selected, options = {}) {
     select.appendChild(autoOption);
   }
 
-  LANGUAGES.forEach((lang) => {
+  availableLanguages.forEach((lang) => {
     const option = document.createElement('option');
     option.value = lang.code;
     option.textContent = lang.name;
@@ -362,7 +417,7 @@ function populateSelect(select, selected, options = {}) {
 function voiceLabel(voice) {
   const genderMap = { male: 'Male', female: 'Female', neutral: 'Neutral' };
   const gender = genderMap[String(voice.gender || '').toLowerCase()] || voice.gender || '';
-  return gender ? `${voice.name || voice.id} - ${gender}` : `${voice.name || voice.id}`;
+  return gender ? `${voice.name || voice.id} — ${gender}` : `${voice.name || voice.id}`;
 }
 
 function populateVoiceSelect(voices, selectedVoice) {
@@ -393,8 +448,12 @@ function saveSettings() {
 
 
 function restoreSettings() {
-  const langA = localStorage.getItem('translator.langA') || 'sk';
-  const langB = localStorage.getItem('translator.langB') || 'de';
+  const storedLangA = localStorage.getItem('translator.langA');
+  const storedLangB = localStorage.getItem('translator.langB');
+  const langA = resolveStoredLanguage(storedLangA, ['sk']);
+  const langB = String(storedLangB || '').trim().toLowerCase() === 'auto'
+    ? 'auto'
+    : resolveStoredLanguage(storedLangB, ['de', 'en']);
   populateSelect(langASelect, langA);
   populateSelect(langBSelect, langB, { includeAuto: true });
   if (voiceOutputToggle) voiceOutputToggle.checked = true;
@@ -414,6 +473,18 @@ function restoreSettings() {
   updateModeChip();
 }
 
+
+async function loadLanguages() {
+  try {
+    const data = await fetchJson('/api/languages');
+    const languages = normalizeLanguageOptions(data?.languages);
+    availableLanguages = languages.length ? languages : FALLBACK_LANGUAGES;
+  } catch (err) {
+    console.error('Nepodarilo sa načítať jazyky:', err);
+    availableLanguages = FALLBACK_LANGUAGES;
+    if (currentUser) showToast('Language list unavailable, using fallback');
+  }
+}
 
 async function loadVoices() {
   const selected = localStorage.getItem('translator.voice') || 'Adrian';
@@ -445,6 +516,7 @@ async function showApp(session) {
   loginShell.hidden = true;
   appShell.hidden = false;
   setLoginStatus('');
+  await loadLanguages();
   restoreSettings();
   await loadVoices();
   await refreshUsage();
@@ -1050,6 +1122,5 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-restoreSettings();
 if (repeatLastBtn) repeatLastBtn.disabled = true;
 checkSession();
