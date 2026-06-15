@@ -1,43 +1,43 @@
 const LANGUAGES = [
-  { code: 'sk', name: 'Slovenčina' },
-  { code: 'de', name: 'Nemčina' },
-  { code: 'en', name: 'Angličtina' },
-  { code: 'pl', name: 'Poľština' },
-  { code: 'cs', name: 'Čeština' },
-  { code: 'uk', name: 'Ukrajinčina' },
-  { code: 'ru', name: 'Ruština' },
-  { code: 'hu', name: 'Maďarčina' },
-  { code: 'fr', name: 'Francúzština' },
-  { code: 'es', name: 'Španielčina' },
-  { code: 'it', name: 'Taliančina' },
-  { code: 'pt', name: 'Portugalčina' },
-  { code: 'nl', name: 'Holandčina' },
-  { code: 'sv', name: 'Švédčina' },
-  { code: 'da', name: 'Dánčina' },
-  { code: 'no', name: 'Nórčina' },
-  { code: 'fi', name: 'Fínčina' },
-  { code: 'ro', name: 'Rumunčina' },
-  { code: 'bg', name: 'Bulharčina' },
-  { code: 'el', name: 'Gréčtina' },
-  { code: 'tr', name: 'Turečtina' },
-  { code: 'ar', name: 'Arabčina' },
-  { code: 'he', name: 'Hebrejčina' },
-  { code: 'hi', name: 'Hindčina' },
-  { code: 'bn', name: 'Bengálčina' },
-  { code: 'id', name: 'Indonézština' },
-  { code: 'vi', name: 'Vietnamčina' },
-  { code: 'th', name: 'Thajčina' },
-  { code: 'ko', name: 'Kórejčina' },
-  { code: 'ja', name: 'Japončina' },
-  { code: 'zh', name: 'Čínština' },
-  { code: 'af', name: 'Afrikánčina' },
-  { code: 'ca', name: 'Katalánčina' },
-  { code: 'hr', name: 'Chorvátčina' },
-  { code: 'et', name: 'Estónčina' },
-  { code: 'lv', name: 'Lotyština' },
-  { code: 'lt', name: 'Litovčina' },
-  { code: 'sl', name: 'Slovinčina' },
-  { code: 'sr', name: 'Srbčina' }
+  { code: 'sk', name: 'Slovak' },
+  { code: 'de', name: 'German' },
+  { code: 'en', name: 'English' },
+  { code: 'pl', name: 'Polish' },
+  { code: 'cs', name: 'Czech' },
+  { code: 'uk', name: 'Ukrainian' },
+  { code: 'ru', name: 'Russian' },
+  { code: 'hu', name: 'Hungarian' },
+  { code: 'fr', name: 'French' },
+  { code: 'es', name: 'Spanish' },
+  { code: 'it', name: 'Italian' },
+  { code: 'pt', name: 'Portuguese' },
+  { code: 'nl', name: 'Dutch' },
+  { code: 'sv', name: 'Swedish' },
+  { code: 'da', name: 'Danish' },
+  { code: 'no', name: 'Norwegian' },
+  { code: 'fi', name: 'Finnish' },
+  { code: 'ro', name: 'Romanian' },
+  { code: 'bg', name: 'Bulgarian' },
+  { code: 'el', name: 'Greek' },
+  { code: 'tr', name: 'Turkish' },
+  { code: 'ar', name: 'Arabic' },
+  { code: 'he', name: 'Hebrew' },
+  { code: 'hi', name: 'Hindi' },
+  { code: 'bn', name: 'Bengali' },
+  { code: 'id', name: 'Indonesian' },
+  { code: 'vi', name: 'Vietnamese' },
+  { code: 'th', name: 'Thai' },
+  { code: 'ko', name: 'Korean' },
+  { code: 'ja', name: 'Japanese' },
+  { code: 'zh', name: 'Chinese' },
+  { code: 'af', name: 'Afrikaans' },
+  { code: 'ca', name: 'Catalan' },
+  { code: 'hr', name: 'Croatian' },
+  { code: 'et', name: 'Estonian' },
+  { code: 'lv', name: 'Latvian' },
+  { code: 'lt', name: 'Lithuanian' },
+  { code: 'sl', name: 'Slovenian' },
+  { code: 'sr', name: 'Serbian' }
 ];
 
 const FALLBACK_VOICES = [
@@ -71,6 +71,8 @@ const modeChip = document.getElementById('modeChip');
 const latencyInfoEl = document.getElementById('latencyInfo');
 const originalTextEl = document.getElementById('originalText');
 const translatedTextEl = document.getElementById('translatedText');
+const originalLangBadge = document.getElementById('originalLangBadge');
+const translatedLangBadge = document.getElementById('translatedLangBadge');
 const levelBar = document.getElementById('levelBar');
 const statusEl = document.getElementById('status');
 const copyOriginalBtn = document.getElementById('copyOriginalBtn');
@@ -106,11 +108,28 @@ let currentUser = null;
 
 const PRE_READY_MAX_CHUNKS = 8;
 const MAX_WS_BUFFERED_AMOUNT = 512 * 1024;
+const HEADSET_DEVICE_HINTS = [
+  'airpod',
+  'bluetooth',
+  'buds',
+  'earbud',
+  'earpiece',
+  'hands-free',
+  'handsfree',
+  'headphone',
+  'headset',
+  'jabra',
+  'sony',
+  'bose',
+  'beats',
+  'soundcore'
+];
 let preReadyAudioQueue = [];
 let preReadyAudioBytes = 0;
 let serverReadyAt = 0;
 let audioChunksCaptured = 0;
 let audioChunksDropped = 0;
+let detectedOutputMode = 'speaker';
 
 function setStatus(text, variant = 'idle') {
   statusEl.textContent = text;
@@ -123,9 +142,52 @@ function setChip(el, text, variant = 'idle') {
   el.dataset.variant = variant;
 }
 
+function getOutputMode() {
+  return outputModeSelect?.value || detectedOutputMode || 'speaker';
+}
+
 function updateModeChip() {
-  const mode = outputModeSelect?.value || 'speaker';
-  setChip(modeChip, mode === 'headphones' ? 'Slúchadlá · mikrofón aktívny' : 'Reproduktor · stlmenie pri TTS', mode === 'headphones' ? 'info' : 'idle');
+  const mode = getOutputMode();
+  setChip(modeChip, mode === 'headphones' ? 'Headphones' : 'Speaker', mode === 'headphones' ? 'info' : 'idle');
+}
+
+function selectedLanguageName(select) {
+  if (!select) return '';
+  if (select.value === 'auto') return 'Auto';
+  const match = LANGUAGES.find((lang) => lang.code === select.value);
+  return match?.name || select.selectedOptions?.[0]?.textContent || '';
+}
+
+function updateLanguageBadges() {
+  if (originalLangBadge) originalLangBadge.textContent = selectedLanguageName(langASelect) || 'Original';
+  if (translatedLangBadge) translatedLangBadge.textContent = selectedLanguageName(langBSelect) || 'Translation';
+}
+
+function deviceLabelLooksLikeHeadset(label) {
+  const clean = String(label || '').toLowerCase();
+  return Boolean(clean) && HEADSET_DEVICE_HINTS.some((hint) => clean.includes(hint));
+}
+
+async function detectOutputModeFromDevices() {
+  if (!navigator.mediaDevices?.enumerateDevices) return 'speaker';
+
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const hasHeadset = devices
+      .filter((device) => device.kind === 'audioinput' || device.kind === 'audiooutput')
+      .some((device) => deviceLabelLooksLikeHeadset(device.label));
+    return hasHeadset ? 'headphones' : 'speaker';
+  } catch (err) {
+    console.warn('Audio device detection failed, using speaker mode:', err);
+    return 'speaker';
+  }
+}
+
+async function applyAutomaticOutputMode() {
+  detectedOutputMode = await detectOutputModeFromDevices();
+  if (outputModeSelect) outputModeSelect.value = detectedOutputMode;
+  updateModeChip();
+  return detectedOutputMode;
 }
 
 function updateLatencyInfo(extra = {}) {
@@ -283,7 +345,7 @@ function populateSelect(select, selected, options = {}) {
   if (includeAuto) {
     const autoOption = document.createElement('option');
     autoOption.value = 'auto';
-    autoOption.textContent = 'Auto: cudzí jazyk → môj jazyk';
+    autoOption.textContent = 'Auto';
     autoOption.selected = selected === 'auto';
     select.appendChild(autoOption);
   }
@@ -298,9 +360,9 @@ function populateSelect(select, selected, options = {}) {
 }
 
 function voiceLabel(voice) {
-  const genderMap = { male: 'mužský', female: 'ženský', neutral: 'neutrálny' };
+  const genderMap = { male: 'Male', female: 'Female', neutral: 'Neutral' };
   const gender = genderMap[String(voice.gender || '').toLowerCase()] || voice.gender || '';
-  return gender ? `${voice.name || voice.id} · ${gender}` : `${voice.name || voice.id}`;
+  return gender ? `${voice.name || voice.id} - ${gender}` : `${voice.name || voice.id}`;
 }
 
 function populateVoiceSelect(voices, selectedVoice) {
@@ -323,9 +385,10 @@ function saveSettings() {
   localStorage.setItem('translator.langA', langASelect.value);
   localStorage.setItem('translator.langB', langBSelect.value);
   localStorage.setItem('translator.voice', voiceSelect.value || 'Adrian');
-  localStorage.setItem('translator.ttsEnabled', String(voiceOutputToggle.checked));
+  if (voiceOutputToggle) voiceOutputToggle.checked = true;
+  localStorage.setItem('translator.ttsEnabled', 'true');
   localStorage.setItem('translator.endpointDelay', endpointDelaySelect.value);
-  localStorage.setItem('translator.outputMode', outputModeSelect?.value || 'speaker');
+  localStorage.setItem('translator.outputMode', getOutputMode());
 }
 
 
@@ -334,7 +397,8 @@ function restoreSettings() {
   const langB = localStorage.getItem('translator.langB') || 'de';
   populateSelect(langASelect, langA);
   populateSelect(langBSelect, langB, { includeAuto: true });
-  voiceOutputToggle.checked = localStorage.getItem('translator.ttsEnabled') !== 'false';
+  if (voiceOutputToggle) voiceOutputToggle.checked = true;
+  localStorage.setItem('translator.ttsEnabled', 'true');
   const storedEndpointDelay = localStorage.getItem('translator.endpointDelay');
   const migrationDone = localStorage.getItem('translator.endpointDelay.v51Default500') === 'true';
   if (!migrationDone && (!storedEndpointDelay || storedEndpointDelay === '900')) {
@@ -344,7 +408,9 @@ function restoreSettings() {
   } else {
     endpointDelaySelect.value = storedEndpointDelay || '500';
   }
-  if (outputModeSelect) outputModeSelect.value = localStorage.getItem('translator.outputMode') || 'speaker';
+  detectedOutputMode = 'speaker';
+  if (outputModeSelect) outputModeSelect.value = detectedOutputMode;
+  updateLanguageBadges();
   updateModeChip();
 }
 
@@ -360,7 +426,7 @@ async function loadVoices() {
   } catch (err) {
     console.error('Nepodarilo sa načítať hlasy:', err);
     populateVoiceSelect(FALLBACK_VOICES, selected);
-    if (currentUser) showToast('Hlasy sa nepodarilo načítať, používam fallback');
+    if (currentUser) showToast('Voice list unavailable, using fallback');
   }
 }
 
@@ -369,7 +435,7 @@ function showLogin() {
   loginShell.hidden = false;
   appShell.hidden = true;
   accessCodeInput.value = '';
-  accessCodeInput.focus();
+  if (window.matchMedia?.('(hover: hover)').matches) accessCodeInput.focus();
 }
 
 async function showApp(session) {
@@ -561,8 +627,8 @@ function connectWebSocket() {
       language_a: langASelect.value,
       language_b: langBSelect.value,
       tts_voice: voiceSelect.value || 'Adrian',
-      tts_enabled: voiceOutputToggle.checked,
-      output_mode: outputModeSelect?.value || 'speaker',
+      tts_enabled: true,
+      output_mode: getOutputMode(),
       endpoint_delay_ms: Number(endpointDelaySelect.value || 500)
     }));
     setStatus('Pripájam Soniox…', 'running');
@@ -664,7 +730,7 @@ function handleJsonMessage(msg) {
       break;
     case 'auth_required':
       setStatus('Prístup odmietnutý', 'error');
-      showToast('Prístup odmietnutý');
+      showToast('Access denied');
       showLogin();
       break;
     case 'error':
@@ -774,15 +840,15 @@ function sendSettingsUpdate() {
     ws.send(JSON.stringify({
       type: 'update_settings',
       tts_voice: voiceSelect.value || 'Adrian',
-      tts_enabled: voiceOutputToggle.checked,
-      output_mode: outputModeSelect?.value || 'speaker'
+      tts_enabled: true,
+      output_mode: getOutputMode()
     }));
   }
 }
 
 function setControlsRunningState(running) {
   startBtn.classList.toggle('stop', running);
-  startBtnText.textContent = running ? 'Zastaviť konverzáciu' : 'Spustiť konverzáciu';
+  startBtnText.textContent = running ? 'Stop Conversation' : 'Start Conversation';
   langASelect.disabled = running;
   langBSelect.disabled = running;
   endpointDelaySelect.disabled = running;
@@ -818,6 +884,7 @@ async function startTranslation() {
     updateModeChip();
 
     await startMicrophone();
+    await applyAutomaticOutputMode();
     await requestWakeLock();
     setStatus('Pripájam server…', 'running');
     setChip(connectionChip, 'Pripájam server', 'info');
@@ -834,7 +901,7 @@ async function startTranslation() {
     setStatus('Mikrofón nepovolený', 'error');
     setChip(micChip, 'Mikrofón odmietnutý', 'error');
     setChip(connectionChip, 'Pripravené', 'idle');
-    showToast('Povoľ mikrofón v prehliadači');
+    showToast('Allow microphone access in Chrome');
   }
 }
 
@@ -887,11 +954,11 @@ async function stopTranslation(options = {}) {
 
 async function copyText(text, label) {
   if (!text.trim()) {
-    showToast('Nie je čo kopírovať');
+    showToast('Nothing to copy');
     return;
   }
   await navigator.clipboard.writeText(text);
-  showToast(`${label} skopírovaný`);
+  showToast(`${label} copied`);
 }
 
 function clearText() {
@@ -906,20 +973,20 @@ loginForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const code = accessCodeInput.value.trim();
   if (!code) {
-    setLoginStatus('Zadaj prístupový kód.', 'error');
+    setLoginStatus('Enter your access code.', 'error');
     return;
   }
 
-  setLoginStatus('Overujem prístup…', 'idle');
+  setLoginStatus('Checking access...', 'idle');
   try {
     const session = await fetchJson('/api/login', {
       method: 'POST',
       body: JSON.stringify({ code })
     });
     await showApp(session);
-    showToast('Prístup povolený');
+    showToast('Access granted');
   } catch (err) {
-    setLoginStatus(err.message || 'Nesprávny prístupový kód.', 'error');
+    setLoginStatus(err.message || 'Incorrect access code.', 'error');
   }
 });
 
@@ -935,13 +1002,14 @@ logoutBtn.addEventListener('click', async () => {
 
 swapBtn.addEventListener('click', () => {
   if (langBSelect.value === 'auto') {
-    showToast('Pri automatickom režime nie je čo vymeniť');
+    showToast('Auto mode cannot be swapped');
     return;
   }
 
   const tmp = langASelect.value;
   langASelect.value = langBSelect.value;
   langBSelect.value = tmp;
+  updateLanguageBadges();
   saveSettings();
 });
 
@@ -954,19 +1022,19 @@ voiceSelect.addEventListener('change', sendSettingsUpdate);
 voiceOutputToggle.addEventListener('change', sendSettingsUpdate);
 if (outputModeSelect) outputModeSelect.addEventListener('change', () => { saveSettings(); updateModeChip(); sendSettingsUpdate(); });
 endpointDelaySelect.addEventListener('change', saveSettings);
-langASelect.addEventListener('change', saveSettings);
-langBSelect.addEventListener('change', saveSettings);
+langASelect.addEventListener('change', () => { updateLanguageBadges(); saveSettings(); });
+langBSelect.addEventListener('change', () => { updateLanguageBadges(); saveSettings(); });
 
-copyOriginalBtn.addEventListener('click', () => copyText(originalTextEl.textContent, 'Originál'));
-copyTranslatedBtn.addEventListener('click', () => copyText(translatedTextEl.textContent, 'Preklad'));
-copyAllBtn.addEventListener('click', () => copyText(`Originál:\n${originalTextEl.textContent}\n\nPreklad:\n${translatedTextEl.textContent}`, 'Celý text'));
+copyOriginalBtn.addEventListener('click', () => copyText(originalTextEl.textContent, 'Original'));
+copyTranslatedBtn.addEventListener('click', () => copyText(translatedTextEl.textContent, 'Translation'));
+copyAllBtn.addEventListener('click', () => copyText(`Original:\n${originalTextEl.textContent}\n\nTranslation:\n${translatedTextEl.textContent}`, 'Full text'));
 clearBtn.addEventListener('click', clearText);
 repeatLastBtn.addEventListener('click', replayLastAudio);
 stopAudioBtn.addEventListener('click', () => stopCurrentAudioPlayback(true));
 textOnlyBtn.addEventListener('click', () => {
   voiceOutputToggle.checked = false;
   sendSettingsUpdate();
-  showToast('Zapnutý rýchly textový režim bez hlasu');
+  showToast('Text mode enabled');
 });
 
 window.addEventListener('beforeunload', () => {
