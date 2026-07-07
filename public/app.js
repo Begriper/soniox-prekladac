@@ -62,7 +62,6 @@ const swapBtn = document.getElementById('swapBtn');
 const startBtn = document.getElementById('startBtn');
 const startBtnText = document.getElementById('startBtnText');
 const voiceSelect = document.getElementById('voiceSelect');
-const endpointDelaySelect = document.getElementById('endpointDelay');
 const voiceOutputToggle = document.getElementById('voiceOutputToggle');
 const outputModeSelect = document.getElementById('outputMode');
 const connectionChip = document.getElementById('connectionChip');
@@ -463,7 +462,6 @@ function saveSettings() {
   localStorage.setItem('translator.voice', voiceSelect.value || 'Adrian');
   if (voiceOutputToggle) voiceOutputToggle.checked = true;
   localStorage.setItem('translator.ttsEnabled', 'true');
-  localStorage.setItem('translator.endpointDelay', endpointDelaySelect.value);
   localStorage.setItem('translator.outputMode', getOutputMode());
 }
 
@@ -479,15 +477,6 @@ function restoreSettings() {
   populateSelect(langBSelect, langB, { includeAuto: true });
   if (voiceOutputToggle) voiceOutputToggle.checked = true;
   localStorage.setItem('translator.ttsEnabled', 'true');
-  const storedEndpointDelay = localStorage.getItem('translator.endpointDelay');
-  const migrationDone = localStorage.getItem('translator.endpointDelay.v51Default500') === 'true';
-  if (!migrationDone && (!storedEndpointDelay || storedEndpointDelay === '900')) {
-    endpointDelaySelect.value = '500';
-    localStorage.setItem('translator.endpointDelay', '500');
-    localStorage.setItem('translator.endpointDelay.v51Default500', 'true');
-  } else {
-    endpointDelaySelect.value = storedEndpointDelay || '500';
-  }
   detectedOutputMode = 'speaker';
   if (outputModeSelect) outputModeSelect.value = detectedOutputMode;
   updateLanguageBadges();
@@ -722,7 +711,7 @@ function connectWebSocket() {
       tts_voice: voiceSelect.value || 'Adrian',
       tts_enabled: true,
       output_mode: getOutputMode(),
-      endpoint_delay_ms: Number(endpointDelaySelect.value || 500)
+      endpoint_delay_ms: 500
     }));
     setStatus('Pripájam Soniox…', 'running');
     setChip(connectionChip, 'Server spojený', 'info');
@@ -1053,7 +1042,6 @@ function setControlsRunningState(running) {
   startBtnText.textContent = running ? 'Stop Conversation' : 'Start Conversation';
   langASelect.disabled = running;
   langBSelect.disabled = running;
-  endpointDelaySelect.disabled = running;
   if (outputModeSelect) outputModeSelect.disabled = false;
   updateModeChip();
 }
@@ -1225,7 +1213,6 @@ startBtn.addEventListener('click', () => {
 voiceSelect.addEventListener('change', sendSettingsUpdate);
 voiceOutputToggle.addEventListener('change', sendSettingsUpdate);
 if (outputModeSelect) outputModeSelect.addEventListener('change', () => { saveSettings(); updateModeChip(); sendSettingsUpdate(); });
-endpointDelaySelect.addEventListener('change', saveSettings);
 langASelect.addEventListener('change', () => { updateLanguageBadges(); saveSettings(); });
 langBSelect.addEventListener('change', () => { updateLanguageBadges(); saveSettings(); });
 

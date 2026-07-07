@@ -457,10 +457,10 @@ input:disabled {
 .settings-panel {
   min-height: 64px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 1px minmax(0, 0.9fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   gap: 0;
-  padding: 0 14px;
+  padding: 0 18px;
   border: 1px solid var(--line);
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.94);
@@ -484,20 +484,10 @@ input:disabled {
   color: #5d41f2;
 }
 
-.speed-icon {
-  color: #1f66ee;
-}
-
 .setting-block select {
   min-height: 48px;
   padding-left: 10px;
   font-size: clamp(0.92rem, 4vw, 1.13rem);
-}
-
-.settings-divider {
-  width: 1px;
-  height: 40px;
-  background: var(--line);
 }
 
 .transcript-grid {
