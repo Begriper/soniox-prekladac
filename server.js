@@ -6,10 +6,15 @@ const WebSocket = require("ws");
 const { performance } = require("perf_hooks");
 const crypto = require("crypto");
 const {
+  appendConversationToken,
   bytesLength,
   chunkTextForTts,
+  clearConversationNonFinalText,
+  createConversationTimelineState,
+  DEFAULT_STT_MODEL,
   formatKb,
   formatMb,
+  markConversationEndpoint,
   normalizeBoolean,
   normalizeEndpointDelay,
   normalizeLanguageCode,
@@ -17,10 +22,12 @@ const {
   normalizeSttLanguageList,
   normalizeTtsVoiceList,
   normalizeVoiceId,
+  serializeConversationItems,
 } = require("./server-utils");
 
 const APP_VERSION = "2.7.0-v6-production-hardening";
 const TTS_TRANSPORT = "rest";
+const STT_MODEL = DEFAULT_STT_MODEL;
 
 const SONIOX_REGION = String(process.env.SONIOX_REGION || "eu")
   .trim()
@@ -314,7 +321,7 @@ let cachedTtsVoicesAt = 0;
 let cachedTtsModelId = "tts-rt-v1";
 let cachedSttLanguages = null;
 let cachedSttLanguagesAt = 0;
-let cachedSttModelId = "stt-rt-v4";
+let cachedSttModelId = STT_MODEL;
 let cachedSttLanguagesFallback = false;
 const runtimeCounters = {
   ttsRestFallbacks: 0,
@@ -738,14 +745,14 @@ async function fetchSttLanguages() {
   }
 
   const data = await response.json();
-  const { languages, modelId } = normalizeSttLanguageList(data, "stt-rt-v4");
+  const { languages, modelId } = normalizeSttLanguageList(data, STT_MODEL);
   if (!languages.length) {
     throw new Error("Soniox STT models response did not include languages");
   }
 
   cachedSttLanguages = languages;
   cachedSttLanguagesAt = now;
-  cachedSttModelId = modelId || "stt-rt-v4";
+  cachedSttModelId = modelId || STT_MODEL;
   cachedSttLanguagesFallback = false;
   return cachedSttLanguages;
 }
@@ -876,8 +883,8 @@ app.get("/api/diagnostics", requireSession, (req, res) => {
       tts_host: endpointHost(SONIOX_TTS_REST_URL),
       stt_models_host: endpointHost(SONIOX_STT_MODELS_URL),
       tts_models_host: endpointHost(SONIOX_TTS_MODELS_URL),
-      stt_model: "stt-rt-v4",
-      stt_languages_model: cachedSttModelId || "stt-rt-v4",
+      stt_model: STT_MODEL,
+      stt_languages_model: cachedSttModelId || STT_MODEL,
       stt_languages_count: Array.isArray(cachedSttLanguages)
         ? cachedSttLanguages.length
         : 0,
@@ -957,7 +964,7 @@ app.get("/api/languages", requireSession, async (req, res) => {
     console.error("Nepodarilo sa načítať Soniox STT jazyky:", err);
     cachedSttLanguages = FALLBACK_STT_LANGUAGES;
     cachedSttLanguagesAt = Date.now();
-    cachedSttModelId = cachedSttModelId || "stt-rt-v4";
+    cachedSttModelId = cachedSttModelId || STT_MODEL;
     cachedSttLanguagesFallback = true;
     res.json({
       languages: FALLBACK_STT_LANGUAGES,
@@ -1243,10 +1250,11 @@ wss.on("connection", (clientWs, req) => {
 
   let isMuted = false;
 
-  let finalOriginalText = "";
-  let finalTranslationText = "";
-  let nonFinalOriginalText = "";
-  let nonFinalTranslationText = "";
+  let finalTextA = "";
+  let finalTextB = "";
+  let nonFinalTextA = "";
+  let nonFinalTextB = "";
+  let conversationTimeline = createConversationTimelineState();
 
   let pendingTtsText = "";
   let pendingTtsLanguage = langB;
@@ -1467,6 +1475,9 @@ wss.on("connection", (clientWs, req) => {
         type: "token",
         original_text: "",
         translated_text: "",
+        final_original_text: "",
+        final_translated_text: "",
+        conversation_items: [],
       });
       return;
     }
@@ -1483,10 +1494,11 @@ wss.on("connection", (clientWs, req) => {
   }
 
   function resetTextState() {
-    finalOriginalText = "";
-    finalTranslationText = "";
-    nonFinalOriginalText = "";
-    nonFinalTranslationText = "";
+    finalTextA = "";
+    finalTextB = "";
+    nonFinalTextA = "";
+    nonFinalTextB = "";
+    conversationTimeline = createConversationTimelineState();
     pendingTtsText = "";
     pendingTtsLanguage = langB === "auto" ? langA : langB;
   }
@@ -1645,7 +1657,7 @@ wss.on("connection", (clientWs, req) => {
 
     const initMsg = {
       api_key: process.env.SONIOX_API_KEY,
-      model: "stt-rt-v4",
+      model: STT_MODEL,
       audio_format: "pcm_s16le",
       sample_rate: 16000,
       num_channels: 1,
@@ -1770,11 +1782,25 @@ wss.on("connection", (clientWs, req) => {
     const tokens = Array.isArray(result.tokens) ? result.tokens : [];
     if (!tokens.length) return;
 
-    let nextNonFinalOriginal = "";
-    let nextNonFinalTranslation = "";
+    let nextNonFinalA = "";
+    let nextNonFinalB = "";
     let finalTranslationDelta = "";
     const targetLanguage = langB === "auto" ? langA : langB;
     let detectedTranslationLanguage = pendingTtsLanguage || targetLanguage;
+    clearConversationNonFinalText(conversationTimeline);
+
+    const resolveDisplayBucket = (tokenLanguage, sourceLanguage, isTranslation) => {
+      if (langB === "auto") {
+        return isTranslation ? "B" : "A";
+      }
+      if (tokenLanguage === langA) return "A";
+      if (tokenLanguage === langB) return "B";
+      if (isTranslation) {
+        if (sourceLanguage === langA) return "B";
+        if (sourceLanguage === langB) return "A";
+      }
+      return "A";
+    };
 
     for (const token of tokens) {
       if (!token || typeof token.text !== "string") continue;
@@ -1783,11 +1809,14 @@ wss.on("connection", (clientWs, req) => {
       const status = token.translation_status || "original";
       const isTranslation = status === "translation";
       const isFinal = Boolean(token.is_final);
+      const tokenLanguage = normalizeLanguageCode(token.language);
+      const sourceLanguage = normalizeLanguageCode(token.source_language);
 
       if (isStreamMarker(text)) {
         metrics.streamMarkers += 1;
         if (text === "<end>") {
           metrics.endpointMarkers += 1;
+          markConversationEndpoint(conversationTimeline);
           recordFirstMetric("firstEndpointMarkerAt", "first_endpoint_marker", {
             marker: text,
             status,
@@ -1804,6 +1833,12 @@ wss.on("connection", (clientWs, req) => {
         continue;
       }
 
+      const timelineResult = appendConversationToken(conversationTimeline, token, {
+        languageA: langA,
+        languageB: langB,
+      });
+      const bucket = resolveDisplayBucket(tokenLanguage, sourceLanguage, isTranslation);
+
       if (isTranslation) {
         metrics.translationTokens += 1;
         recordFirstMetric("firstTranslationTokenAt", "first_translation_token", {
@@ -1811,6 +1846,7 @@ wss.on("connection", (clientWs, req) => {
           chars: text.length,
           language: token.language || null,
           source_language: token.source_language || null,
+          bucket,
         });
         if (isFinal) {
           metrics.finalTranslationTokens += 1;
@@ -1818,12 +1854,13 @@ wss.on("connection", (clientWs, req) => {
             chars: text.length,
             language: token.language || null,
             source_language: token.source_language || null,
+            bucket,
           });
         }
-        const tokenLanguage = normalizeLanguageCode(token.language);
-        const sourceLanguage = normalizeLanguageCode(token.source_language);
 
-        if (tokenLanguage) {
+        if (timelineResult.tts_language) {
+          detectedTranslationLanguage = timelineResult.tts_language;
+        } else if (tokenLanguage) {
           detectedTranslationLanguage = tokenLanguage;
         } else if (sourceLanguage === langA) {
           detectedTranslationLanguage = targetLanguage;
@@ -1832,10 +1869,9 @@ wss.on("connection", (clientWs, req) => {
         }
 
         if (isFinal) {
-          finalTranslationText += text;
-          finalTranslationDelta += text;
+          finalTranslationDelta += timelineResult.tts_text || text;
         } else {
-          nextNonFinalTranslation += text;
+          // Non-final translation tokens are displayed but not sent to TTS.
         }
       } else {
         metrics.originalTokens += 1;
@@ -1843,34 +1879,50 @@ wss.on("connection", (clientWs, req) => {
           is_final: isFinal,
           chars: text.length,
           language: token.language || null,
+          bucket,
         });
         if (isFinal) {
           metrics.finalOriginalTokens += 1;
           recordFirstMetric("firstFinalOriginalAt", "first_final_original_token", {
             chars: text.length,
             language: token.language || null,
+            bucket,
           });
-          finalOriginalText += text;
+        }
+      }
+
+      if (bucket === "A") {
+        if (isFinal) {
+          finalTextA += text;
         } else {
-          nextNonFinalOriginal += text;
+          nextNonFinalA += text;
+        }
+      } else {
+        if (isFinal) {
+          finalTextB += text;
+        } else {
+          nextNonFinalB += text;
         }
       }
     }
 
-    finalOriginalText = truncateText(finalOriginalText);
-    finalTranslationText = truncateText(finalTranslationText);
-    nonFinalOriginalText = nextNonFinalOriginal;
-    nonFinalTranslationText = nextNonFinalTranslation;
+    finalTextA = truncateText(finalTextA);
+    finalTextB = truncateText(finalTextB);
+    nonFinalTextA = nextNonFinalA;
+    nonFinalTextB = nextNonFinalB;
 
-    const originalText = truncateText(finalOriginalText + nonFinalOriginalText);
-    const translatedText = truncateText(finalTranslationText + nonFinalTranslationText);
+    const originalText = truncateText(finalTextA + nonFinalTextA);
+    const translatedText = truncateText(finalTextB + nonFinalTextB);
 
     safeSendJson(clientWs, {
       type: "token",
       original_text: originalText,
       translated_text: translatedText,
-      final_original_text: finalOriginalText,
-      final_translated_text: finalTranslationText,
+      final_original_text: finalTextA,
+      final_translated_text: finalTextB,
+      conversation_items: serializeConversationItems(conversationTimeline),
+      language_a: langA,
+      language_b: langB,
       tts_enabled: ttsEnabled,
     });
 

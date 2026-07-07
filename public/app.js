@@ -74,10 +74,13 @@ const originalTextEl = document.getElementById('originalText');
 const translatedTextEl = document.getElementById('translatedText');
 const originalLangBadge = document.getElementById('originalLangBadge');
 const translatedLangBadge = document.getElementById('translatedLangBadge');
+const conversationFeedEl = document.getElementById('conversationFeed');
+const conversationModeBadge = document.getElementById('conversationModeBadge');
 const levelBar = document.getElementById('levelBar');
 const statusEl = document.getElementById('status');
 const copyOriginalBtn = document.getElementById('copyOriginalBtn');
 const copyTranslatedBtn = document.getElementById('copyTranslatedBtn');
+const copyConversationBtn = document.getElementById('copyConversationBtn');
 const copyAllBtn = document.getElementById('copyAllBtn');
 const clearBtn = document.getElementById('clearBtn');
 const repeatLastBtn = document.getElementById('repeatLastBtn');
@@ -106,6 +109,7 @@ let audioQueue = [];
 let isPlaying = false;
 let wakeLock = null;
 let currentUser = null;
+let conversationItems = [];
 
 const PRE_READY_MAX_CHUNKS = 8;
 const MAX_WS_BUFFERED_AMOUNT = 512 * 1024;
@@ -159,9 +163,26 @@ function selectedLanguageName(select) {
   return match?.name || select.selectedOptions?.[0]?.textContent || '';
 }
 
+function languageNameForCode(code) {
+  const cleanCode = String(code || '').trim().toLowerCase();
+  if (!cleanCode) return '';
+  if (cleanCode === 'auto') return 'Auto';
+  const match = availableLanguages.find((lang) => lang.code === cleanCode);
+  return match?.name || cleanCode.toUpperCase();
+}
+
 function updateLanguageBadges() {
   if (originalLangBadge) originalLangBadge.textContent = selectedLanguageName(langASelect) || 'Original';
   if (translatedLangBadge) translatedLangBadge.textContent = selectedLanguageName(langBSelect) || 'Translation';
+  if (conversationModeBadge) {
+    const langAName = selectedLanguageName(langASelect) || 'Language A';
+    const langBName = selectedLanguageName(langBSelect) || 'Language B';
+    conversationModeBadge.textContent = langBSelect.value === 'auto'
+      ? `Auto -> ${langAName}`
+      : `${langAName} <-> ${langBName}`;
+    const autoOption = Array.from(langBSelect.options || []).find((option) => option.value === 'auto');
+    if (autoOption) autoOption.textContent = `Auto -> ${langAName}`;
+  }
 }
 
 function deviceLabelLooksLikeHeadset(label) {
@@ -737,6 +758,112 @@ function connectWebSocket() {
   };
 }
 
+function isConversationFeedPinned() {
+  if (!conversationFeedEl) return false;
+  const distanceFromBottom = conversationFeedEl.scrollHeight - conversationFeedEl.scrollTop - conversationFeedEl.clientHeight;
+  return distanceFromBottom < 80;
+}
+
+function conversationDirectionLabel(item) {
+  const source = languageNameForCode(item.source_language) || 'Source';
+  const target = languageNameForCode(item.target_language) || 'Translation';
+  return `${source} -> ${target}`;
+}
+
+function normalizedConversationItems(items) {
+  if (!Array.isArray(items)) return [];
+  return items
+    .filter((item) => item && ((item.source_text || '').trim() || (item.translated_text || '').trim()))
+    .map((item, index) => ({
+      id: String(item.id || `turn-${index + 1}`),
+      source_language: String(item.source_language || ''),
+      target_language: String(item.target_language || ''),
+      source_text: String(item.source_text || ''),
+      translated_text: String(item.translated_text || ''),
+      is_final: Boolean(item.is_final)
+    }));
+}
+
+function legacyConversationItemsFromTokenMessage(msg) {
+  const sourceText = String(msg.original_text || '');
+  const translatedText = String(msg.translated_text || '');
+  if (!sourceText.trim() && !translatedText.trim()) return [];
+  return [{
+    id: 'legacy-live',
+    source_language: msg.language_a || langASelect.value,
+    target_language: msg.language_b === 'auto' ? langASelect.value : (msg.language_b || langBSelect.value),
+    source_text: sourceText,
+    translated_text: translatedText,
+    is_final: false
+  }];
+}
+
+function renderConversationItems(items) {
+  if (!conversationFeedEl) return;
+  const shouldPinToBottom = isConversationFeedPinned();
+  conversationItems = normalizedConversationItems(items);
+  conversationFeedEl.replaceChildren();
+
+  if (!conversationItems.length) {
+    const empty = document.createElement('p');
+    empty.className = 'conversation-empty';
+    empty.textContent = 'Start speaking to build the conversation history.';
+    conversationFeedEl.appendChild(empty);
+    return;
+  }
+
+  for (const item of conversationItems) {
+    const turn = document.createElement('article');
+    turn.className = `conversation-turn${item.is_final ? ' is-final' : ' is-live'}`;
+
+    const header = document.createElement('div');
+    header.className = 'conversation-turn-header';
+
+    const direction = document.createElement('span');
+    direction.className = 'conversation-direction';
+    direction.textContent = conversationDirectionLabel(item);
+    header.appendChild(direction);
+    turn.appendChild(header);
+
+    if (item.source_text.trim()) {
+      const source = document.createElement('p');
+      source.className = 'conversation-source-text';
+      source.textContent = item.source_text;
+      turn.appendChild(source);
+    }
+
+    if (item.source_text.trim() && item.translated_text.trim()) {
+      const divider = document.createElement('div');
+      divider.className = 'conversation-turn-divider';
+      turn.appendChild(divider);
+    }
+
+    if (item.translated_text.trim()) {
+      const translation = document.createElement('p');
+      translation.className = 'conversation-translated-text';
+      translation.textContent = item.translated_text;
+      turn.appendChild(translation);
+    }
+
+    conversationFeedEl.appendChild(turn);
+  }
+
+  if (shouldPinToBottom) {
+    conversationFeedEl.scrollTop = conversationFeedEl.scrollHeight;
+  }
+}
+
+function conversationItemsToText(items = conversationItems) {
+  return normalizedConversationItems(items)
+    .map((item) => {
+      const parts = [conversationDirectionLabel(item)];
+      if (item.source_text.trim()) parts.push(item.source_text.trim());
+      if (item.translated_text.trim()) parts.push(item.translated_text.trim());
+      return parts.join('\n');
+    })
+    .join('\n\n');
+}
+
 function handleJsonMessage(msg) {
   switch (msg.type) {
     case 'stt_connecting':
@@ -755,8 +882,11 @@ function handleJsonMessage(msg) {
       updateLatencyInfo();
       break;
     case 'token':
-      originalTextEl.textContent = msg.original_text || '';
-      translatedTextEl.textContent = msg.translated_text || '';
+      if (originalTextEl) originalTextEl.textContent = msg.original_text || '';
+      if (translatedTextEl) translatedTextEl.textContent = msg.translated_text || '';
+      renderConversationItems(Array.isArray(msg.conversation_items)
+        ? msg.conversation_items
+        : legacyConversationItemsFromTokenMessage(msg));
       if ((msg.final_translated_text || msg.translated_text || '').trim()) repeatLastBtn.disabled = !lastAudioBuffer;
       break;
     case 'mute':
@@ -946,6 +1076,7 @@ async function startTranslation() {
     audioChunksDropped = 0;
     audioQueue = [];
     isPlaying = false;
+    renderConversationItems([]);
     resetPreReadyBuffer();
     stopCurrentAudioPlayback();
     setControlsRunningState(true);
@@ -1034,8 +1165,9 @@ async function copyText(text, label) {
 }
 
 function clearText() {
-  originalTextEl.textContent = '';
-  translatedTextEl.textContent = '';
+  if (originalTextEl) originalTextEl.textContent = '';
+  if (translatedTextEl) translatedTextEl.textContent = '';
+  renderConversationItems([]);
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'clear_text' }));
   }
@@ -1097,9 +1229,16 @@ endpointDelaySelect.addEventListener('change', saveSettings);
 langASelect.addEventListener('change', () => { updateLanguageBadges(); saveSettings(); });
 langBSelect.addEventListener('change', () => { updateLanguageBadges(); saveSettings(); });
 
-copyOriginalBtn.addEventListener('click', () => copyText(originalTextEl.textContent, 'Original'));
-copyTranslatedBtn.addEventListener('click', () => copyText(translatedTextEl.textContent, 'Translation'));
-copyAllBtn.addEventListener('click', () => copyText(`Original:\n${originalTextEl.textContent}\n\nTranslation:\n${translatedTextEl.textContent}`, 'Full text'));
+if (copyOriginalBtn && originalTextEl) {
+  copyOriginalBtn.addEventListener('click', () => copyText(originalTextEl.textContent, 'Original'));
+}
+if (copyTranslatedBtn && translatedTextEl) {
+  copyTranslatedBtn.addEventListener('click', () => copyText(translatedTextEl.textContent, 'Translation'));
+}
+if (copyConversationBtn) {
+  copyConversationBtn.addEventListener('click', () => copyText(conversationItemsToText(), 'Conversation'));
+}
+copyAllBtn.addEventListener('click', () => copyText(conversationItemsToText(), 'Conversation'));
 clearBtn.addEventListener('click', clearText);
 repeatLastBtn.addEventListener('click', replayLastAudio);
 stopAudioBtn.addEventListener('click', () => stopCurrentAudioPlayback(true));

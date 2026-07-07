@@ -509,7 +509,7 @@ input:disabled {
 }
 
 .transcript-card {
-  min-height: clamp(160px, 22svh, 215px);
+  min-height: clamp(330px, 48svh, 560px);
   display: flex;
   flex-direction: column;
   padding: 26px 24px 24px;
@@ -535,7 +535,8 @@ input:disabled {
   letter-spacing: 0;
 }
 
-.translation-card .card-toolbar h2 {
+.translation-card .card-toolbar h2,
+.conversation-card .card-toolbar h2 {
   color: #6e3ff1;
 }
 
@@ -552,7 +553,8 @@ input:disabled {
   font-weight: 600;
 }
 
-.translation-card .lang-badge {
+.translation-card .lang-badge,
+.conversation-card .lang-badge {
   color: #6e3ff1;
   background: #f2edff;
 }
@@ -584,6 +586,78 @@ input:disabled {
   font-size: clamp(1.55rem, 7vw, 2.05rem);
   line-height: 1.32;
   font-weight: 400;
+}
+
+.conversation-feed {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  color: var(--text);
+}
+
+.conversation-empty {
+  margin: auto;
+  max-width: 320px;
+  color: var(--muted);
+  text-align: center;
+  font-size: clamp(1.04rem, 4vw, 1.2rem);
+  line-height: 1.35;
+  font-weight: 650;
+}
+
+.conversation-turn {
+  padding: 0 0 22px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.conversation-turn:last-child {
+  border-bottom: 0;
+}
+
+.conversation-turn-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.conversation-direction {
+  color: var(--muted);
+  font-size: clamp(0.98rem, 3.7vw, 1.08rem);
+  line-height: 1.2;
+  font-weight: 800;
+}
+
+.conversation-source-text,
+.conversation-translated-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.conversation-source-text {
+  color: var(--muted);
+  font-size: clamp(1.06rem, 4.3vw, 1.3rem);
+  line-height: 1.35;
+  font-weight: 500;
+}
+
+.conversation-turn-divider {
+  height: 1px;
+  margin: 14px 0 12px;
+  background: var(--line-soft);
+}
+
+.conversation-translated-text {
+  color: var(--text);
+  font-size: clamp(1.45rem, 6.7vw, 2.05rem);
+  line-height: 1.28;
+  font-weight: 500;
 }
 
 .conversation-actions {
@@ -672,6 +746,6 @@ input:disabled {
   }
 
   .transcript-card {
-    min-height: clamp(185px, 23svh, 235px);
+    min-height: clamp(380px, 52svh, 620px);
   }
 }

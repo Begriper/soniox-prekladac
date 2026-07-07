@@ -124,37 +124,23 @@
         </div>
       </section>
 
-      <section class="transcript-grid" aria-label="Live transcript and translation">
-        <article class="transcript-card original-card">
-          <div class="card-toolbar">
+      <section class="transcript-grid" aria-label="Conversation history">
+        <article class="transcript-card conversation-card">
+          <div class="card-toolbar conversation-toolbar">
             <div>
-              <h2>Original</h2>
-              <span id="originalLangBadge" class="lang-badge">Slovak</span>
+              <h2>Conversation</h2>
+              <span id="conversationModeBadge" class="lang-badge">Slovak -> German</span>
             </div>
-            <button id="copyOriginalBtn" class="icon-btn" type="button" title="Copy original" aria-label="Copy original">
+            <button id="copyConversationBtn" class="icon-btn" type="button" title="Copy conversation" aria-label="Copy conversation">
               <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
                 <rect x="9" y="9" width="10" height="10" rx="1.5"></rect>
                 <rect x="5" y="5" width="10" height="10" rx="1.5"></rect>
               </svg>
             </button>
           </div>
-          <div id="originalText" class="text-content" aria-live="polite"></div>
-        </article>
-
-        <article class="transcript-card translation-card">
-          <div class="card-toolbar">
-            <div>
-              <h2>Translation</h2>
-              <span id="translatedLangBadge" class="lang-badge">German</span>
-            </div>
-            <button id="copyTranslatedBtn" class="icon-btn" type="button" title="Copy translation" aria-label="Copy translation">
-              <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
-                <rect x="9" y="9" width="10" height="10" rx="1.5"></rect>
-                <rect x="5" y="5" width="10" height="10" rx="1.5"></rect>
-              </svg>
-            </button>
+          <div id="conversationFeed" class="conversation-feed" aria-live="polite">
+            <p class="conversation-empty">Start speaking to build the conversation history.</p>
           </div>
-          <div id="translatedText" class="text-content" aria-live="polite"></div>
         </article>
       </section>
 
