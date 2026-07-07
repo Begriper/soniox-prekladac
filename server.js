@@ -23,6 +23,7 @@ const {
   normalizeTtsVoiceList,
   normalizeVoiceId,
   serializeConversationItems,
+  validateReplayTranslationRequest,
 } = require("./server-utils");
 
 const APP_VERSION = "2.7.0-v6-production-hardening";
@@ -1482,6 +1483,47 @@ wss.on("connection", (clientWs, req) => {
       return;
     }
 
+    if (msg.type === "replay_translation") {
+      if (!sessionAuthorized || sessionFinished) {
+        safeSendJson(clientWs, {
+          type: "error",
+          message: "Najprv spusti konverzáciu.",
+        });
+        return;
+      }
+
+      const replayRequest = validateReplayTranslationRequest({
+        item_id: msg.item_id,
+        text: msg.text,
+        language: msg.language,
+        voice: msg.voice || selectedTtsVoice,
+      }, MAX_TTS_CHARS);
+
+      if (!replayRequest.ok) {
+        addUsage(authSession.username, { deniedEvents: 1 });
+        logMetric("tts_replay_rejected", {
+          reason: replayRequest.error,
+          item_id: String(msg.item_id || "").slice(0, 80),
+        });
+        safeSendJson(clientWs, {
+          type: "error",
+          message: "Tento preklad sa nedá zopakovať hlasom.",
+        });
+        return;
+      }
+
+      logMetric("tts_replay_requested", {
+        item_id: replayRequest.item_id || null,
+        chars: replayRequest.text.length,
+        language: replayRequest.language,
+        voice: replayRequest.voice,
+      });
+      enqueueTts(replayRequest.text, replayRequest.language, replayRequest.voice, {
+        replayItemId: replayRequest.item_id,
+      });
+      return;
+    }
+
     if (msg.type === "client_stop") {
       finishClientSession("client_stop");
       return;
@@ -1785,6 +1827,7 @@ wss.on("connection", (clientWs, req) => {
     let nextNonFinalA = "";
     let nextNonFinalB = "";
     let finalTranslationDelta = "";
+    let autoSelfLanguageIgnored = false;
     const targetLanguage = langB === "auto" ? langA : langB;
     let detectedTranslationLanguage = pendingTtsLanguage || targetLanguage;
     clearConversationNonFinalText(conversationTimeline);
@@ -1837,6 +1880,19 @@ wss.on("connection", (clientWs, req) => {
         languageA: langA,
         languageB: langB,
       });
+      if (timelineResult.ignored) {
+        if (timelineResult.reason === "auto_language_a") {
+          autoSelfLanguageIgnored = true;
+          logMetric("auto_language_a_token_ignored", {
+            status,
+            is_final: isFinal,
+            language: token.language || null,
+            source_language: token.source_language || null,
+            chars: text.length,
+          });
+        }
+        continue;
+      }
       const bucket = resolveDisplayBucket(tokenLanguage, sourceLanguage, isTranslation);
 
       if (isTranslation) {
@@ -1924,6 +1980,7 @@ wss.on("connection", (clientWs, req) => {
       language_a: langA,
       language_b: langB,
       tts_enabled: ttsEnabled,
+      auto_self_language_ignored: autoSelfLanguageIgnored,
     });
 
     if (ttsEnabled && finalTranslationDelta.trim()) {
@@ -1960,7 +2017,7 @@ wss.on("connection", (clientWs, req) => {
     }, 420);
   }
 
-  function enqueueTts(text, language) {
+  function enqueueTts(text, language, voice = selectedTtsVoice, options = {}) {
     if (!ttsEnabled) return;
     if (metrics.ttsRequests >= MAX_TTS_REQUESTS_PER_SESSION || !canUseMoreTts(authSession.username, 0, 1)) {
       logMetric("tts_limit_reached", { limit: MAX_TTS_REQUESTS_PER_SESSION });
@@ -1982,14 +2039,15 @@ wss.on("connection", (clientWs, req) => {
         text: chunk,
         language:
           normalizeLanguageCode(language) || (langB === "auto" ? langA : langB),
-        voice: selectedTtsVoice,
+        voice: normalizeVoiceId(voice || selectedTtsVoice),
+        replayItemId: String(options.replayItemId || "").slice(0, 80),
       });
     }
 
     logMetric("tts_enqueued", {
       chars: String(text || "").length,
       language: normalizeLanguageCode(language) || (langB === "auto" ? langA : langB),
-      voice: selectedTtsVoice,
+      voice: normalizeVoiceId(voice || selectedTtsVoice),
       queue_length: ttsQueue.length,
     });
 
@@ -2100,6 +2158,7 @@ wss.on("connection", (clientWs, req) => {
         tts_request_id: ttsRequestId,
         generation_ms: generationMs,
         output_mode: outputMode,
+        replay_item_id: next.replayItemId || "",
       });
       metrics.playAudioSent += 1;
       recordFirstMetric("firstPlayAudioSentAt", "first_play_audio_sent", {

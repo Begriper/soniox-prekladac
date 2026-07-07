@@ -323,10 +323,28 @@ function appendConversationToken(state, token, options = {}) {
   const isFinal = Boolean(token.is_final);
   const tokenLanguage = normalizeLanguageCode(token.language);
   const sourceLanguageFromToken = normalizeLanguageCode(token.source_language);
+  const timelineLanguages = getTimelineLanguages(options);
+
+  if (
+    timelineLanguages.languageB === "auto" &&
+    (
+      (!isTranslation && tokenLanguage === timelineLanguages.languageA) ||
+      (isTranslation && sourceLanguageFromToken === timelineLanguages.languageA)
+    )
+  ) {
+    return {
+      ignored: true,
+      reason: "auto_language_a",
+      item: null,
+      bucket: "ignored",
+      tts_text: "",
+      tts_language: "",
+    };
+  }
 
   const sourceLanguage = isTranslation
     ? sourceLanguageFromToken || inferTranslationSourceLanguage(tokenLanguage, options)
-    : tokenLanguage || getTimelineLanguages(options).languageA;
+    : tokenLanguage || timelineLanguages.languageA;
   const targetLanguage = isTranslation
     ? tokenLanguage || inferTranslationTargetLanguage(sourceLanguage, options)
     : inferTranslationTargetLanguage(sourceLanguage, options);
@@ -354,6 +372,33 @@ function appendConversationToken(state, token, options = {}) {
     bucket: isTranslation ? "translation" : "source",
     tts_text: isTranslation && isFinal ? text : "",
     tts_language: isTranslation ? item.target_language : "",
+  };
+}
+
+function validateReplayTranslationRequest(payload = {}, maxChars = 900) {
+  const maxLength = Math.max(1, Number(maxChars || 900));
+  const text = String(payload?.text || "").trim();
+  const language = normalizeLanguageCode(payload?.language);
+
+  if (!text) {
+    return { ok: false, item_id: "", text: "", language: "", voice: "", error: "empty_text" };
+  }
+
+  if (text.length > maxLength) {
+    return { ok: false, item_id: "", text: "", language: "", voice: "", error: "text_too_long" };
+  }
+
+  if (!language) {
+    return { ok: false, item_id: "", text: "", language: "", voice: "", error: "missing_language" };
+  }
+
+  return {
+    ok: true,
+    item_id: String(payload?.item_id || "").trim().slice(0, 80),
+    text,
+    language,
+    voice: normalizeVoiceId(payload?.voice || "Adrian"),
+    error: "",
   };
 }
 
@@ -464,4 +509,5 @@ module.exports = {
   normalizeTtsVoiceList,
   normalizeVoiceId,
   serializeConversationItems,
+  validateReplayTranslationRequest,
 };

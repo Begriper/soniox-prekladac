@@ -13,6 +13,8 @@ const {
   normalizeSttLanguageList,
   normalizeTtsVoiceList,
   normalizeVoiceId,
+  serializeConversationItems,
+  validateReplayTranslationRequest,
 } = require('../server-utils');
 
 test('normalizeLanguageCode strips region and unsafe characters', () => {
@@ -153,6 +155,75 @@ test('conversation timeline keeps auto mode as detected source to language A', (
   assert.equal(state.items[0].source_text, 'Buenos días');
   assert.equal(state.items[0].translated_text, 'Dobré ráno');
   assert.equal(result.tts_language, 'sk');
+});
+
+test('conversation timeline keeps multiple auto detected languages targeting language A', () => {
+  const state = createConversationTimelineState();
+  const options = { languageA: 'sk', languageB: 'auto' };
+
+  appendConversationToken(state, { text: 'Good morning', translation_status: 'original', language: 'en', is_final: true }, options);
+  appendConversationToken(state, { text: 'Dobré ráno', translation_status: 'translation', language: 'sk', source_language: 'en', is_final: true }, options);
+  markConversationEndpoint(state);
+  appendConversationToken(state, { text: 'Buenos días', translation_status: 'original', language: 'es', is_final: true }, options);
+  appendConversationToken(state, { text: 'Dobré ráno', translation_status: 'translation', language: 'sk', source_language: 'es', is_final: true }, options);
+
+  assert.deepEqual(serializeConversationItems(state).map((item) => ({
+    source_language: item.source_language,
+    target_language: item.target_language,
+    source_text: item.source_text,
+    translated_text: item.translated_text
+  })), [
+    {
+      source_language: 'en',
+      target_language: 'sk',
+      source_text: 'Good morning',
+      translated_text: 'Dobré ráno'
+    },
+    {
+      source_language: 'es',
+      target_language: 'sk',
+      source_text: 'Buenos días',
+      translated_text: 'Dobré ráno'
+    }
+  ]);
+});
+
+test('conversation timeline ignores language A speech in auto mode', () => {
+  const state = createConversationTimelineState();
+  const options = { languageA: 'sk', languageB: 'auto' };
+
+  const originalResult = appendConversationToken(state, { text: 'Ahoj', translation_status: 'original', language: 'sk', is_final: true }, options);
+  const translationResult = appendConversationToken(state, { text: 'Ahoj', translation_status: 'translation', language: 'sk', source_language: 'sk', is_final: true }, options);
+
+  assert.equal(originalResult.ignored, true);
+  assert.equal(translationResult.ignored, true);
+  assert.deepEqual(serializeConversationItems(state), []);
+  assert.equal(translationResult.tts_text, '');
+  assert.equal(translationResult.tts_language, '');
+});
+
+test('validateReplayTranslationRequest accepts safe translated text', () => {
+  const result = validateReplayTranslationRequest({
+    item_id: 'turn-3',
+    text: 'Guten Morgen',
+    language: 'de',
+    voice: 'Cooper — Male'
+  }, 60);
+
+  assert.deepEqual(result, {
+    ok: true,
+    item_id: 'turn-3',
+    text: 'Guten Morgen',
+    language: 'de',
+    voice: 'Cooper  Male',
+    error: ''
+  });
+});
+
+test('validateReplayTranslationRequest rejects empty or too long text', () => {
+  assert.equal(validateReplayTranslationRequest({ text: ' ', language: 'de' }, 10).ok, false);
+  assert.equal(validateReplayTranslationRequest({ text: 'abcdefghijkl', language: 'de' }, 10).ok, false);
+  assert.equal(validateReplayTranslationRequest({ text: 'Hallo', language: '' }, 10).ok, false);
 });
 
 test('normalizeTtsVoiceList keeps all voices from tts-rt-v1 with metadata', () => {

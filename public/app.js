@@ -109,6 +109,10 @@ let isPlaying = false;
 let wakeLock = null;
 let currentUser = null;
 let conversationItems = [];
+let replayAudioCache = new Map();
+let replayPendingCacheKeys = new Set();
+let pendingReplayCacheKeysByItemId = new Map();
+let autoSelfLanguageHintShown = false;
 
 const PRE_READY_MAX_CHUNKS = 8;
 const MAX_WS_BUFFERED_AMOUNT = 512 * 1024;
@@ -177,11 +181,20 @@ function updateLanguageBadges() {
     const langAName = selectedLanguageName(langASelect) || 'Language A';
     const langBName = selectedLanguageName(langBSelect) || 'Language B';
     conversationModeBadge.textContent = langBSelect.value === 'auto'
-      ? `Auto -> ${langAName}`
+      ? 'Auto listening'
       : `${langAName} <-> ${langBName}`;
     const autoOption = Array.from(langBSelect.options || []).find((option) => option.value === 'auto');
     if (autoOption) autoOption.textContent = 'Auto';
   }
+}
+
+function isAutoListenMode() {
+  return langBSelect?.value === 'auto';
+}
+
+function autoListenHintText() {
+  const langAName = selectedLanguageName(langASelect) || 'your language';
+  return `Auto listening translates detected other languages into ${langAName}. Select a target language when you want to speak.`;
 }
 
 function deviceLabelLooksLikeHeadset(label) {
@@ -759,6 +772,34 @@ function conversationDirectionLabel(item) {
   return `${source} -> ${target}`;
 }
 
+function conversationReplayCacheKey(item) {
+  return [
+    String(item?.id || ''),
+    String(item?.target_language || ''),
+    String(item?.translated_text || '').trim()
+  ].join('|');
+}
+
+function createReplayButton(item) {
+  const button = document.createElement('button');
+  const cacheKey = conversationReplayCacheKey(item);
+  const isPending = replayPendingCacheKeys.has(cacheKey);
+  button.className = 'conversation-replay-btn';
+  button.type = 'button';
+  button.title = isPending ? 'Preparing voice' : 'Replay translation';
+  button.setAttribute('aria-label', 'Replay translation');
+  button.disabled = isPending || !String(item.target_language || '').trim();
+  button.innerHTML = `
+    <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+      <path d="M4 9v6h4l5 4V5L8 9H4Z"></path>
+      <path d="M16 9.5a4 4 0 0 1 0 5"></path>
+      <path d="M18.5 7a7 7 0 0 1 0 10"></path>
+    </svg>
+  `;
+  button.addEventListener('click', () => replayConversationTranslation(item));
+  return button;
+}
+
 function normalizedConversationItems(items) {
   if (!Array.isArray(items)) return [];
   return items
@@ -796,7 +837,9 @@ function renderConversationItems(items) {
   if (!conversationItems.length) {
     const empty = document.createElement('p');
     empty.className = 'conversation-empty';
-    empty.textContent = 'Start speaking to build the conversation history.';
+    empty.textContent = isAutoListenMode()
+      ? autoListenHintText()
+      : 'Start speaking to build the conversation history.';
     conversationFeedEl.appendChild(empty);
     return;
   }
@@ -828,10 +871,15 @@ function renderConversationItems(items) {
     }
 
     if (item.translated_text.trim()) {
+      const translationRow = document.createElement('div');
+      translationRow.className = 'conversation-translation-row';
+
       const translation = document.createElement('p');
       translation.className = 'conversation-translated-text';
       translation.textContent = item.translated_text;
-      turn.appendChild(translation);
+      translationRow.appendChild(translation);
+      translationRow.appendChild(createReplayButton(item));
+      turn.appendChild(translationRow);
     }
 
     conversationFeedEl.appendChild(turn);
@@ -851,6 +899,82 @@ function conversationItemsToText(items = conversationItems) {
       return parts.join('\n');
     })
     .join('\n\n');
+}
+
+async function playCachedReplayAudio(buffer) {
+  if (!buffer) return;
+  if (isRunning && isPlaying) {
+    showToast('Wait for current audio to finish');
+    return;
+  }
+
+  stopCurrentAudioPlayback(false);
+  const blob = new Blob([buffer], { type: 'audio/wav' });
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+  currentAudioEl = audio;
+  currentAudioUrl = url;
+  setChip(playbackChip, 'Replaying', 'speaking');
+  setStatus('Replaying saved translation...', 'speaking');
+
+  audio.onended = () => {
+    if (currentAudioEl === audio) currentAudioEl = null;
+    if (currentAudioUrl === url) currentAudioUrl = null;
+    URL.revokeObjectURL(url);
+    setChip(playbackChip, 'Ticho', 'idle');
+    if (isRunning && serverReady && !isMuted) {
+      setStatus(`Počúvam… môžeš hovoriť (${captureMode === 'audioworklet' ? 'AudioWorklet' : 'fallback audio'})`, 'running');
+    } else if (!isRunning) {
+      setStatus('Pripravený', 'idle');
+    }
+  };
+
+  audio.onerror = () => {
+    URL.revokeObjectURL(url);
+    setChip(playbackChip, 'Chyba audia', 'error');
+  };
+
+  try {
+    await audio.play();
+  } catch (err) {
+    showToast('Browser blocked audio replay');
+    audio.onended?.();
+  }
+}
+
+function replayConversationTranslation(item) {
+  const text = String(item?.translated_text || '').trim();
+  const language = String(item?.target_language || '').trim();
+  const itemId = String(item?.id || '').trim();
+  const cacheKey = conversationReplayCacheKey(item);
+
+  if (!text || !language) {
+    showToast('No translated text to replay');
+    return;
+  }
+
+  const cachedAudio = replayAudioCache.get(cacheKey);
+  if (cachedAudio) {
+    playCachedReplayAudio(cachedAudio);
+    return;
+  }
+
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    showToast('Start conversation to generate voice');
+    return;
+  }
+
+  replayPendingCacheKeys.add(cacheKey);
+  if (itemId) pendingReplayCacheKeysByItemId.set(itemId, cacheKey);
+  renderConversationItems(conversationItems);
+  setChip(playbackChip, 'Preparing voice', 'info');
+  ws.send(JSON.stringify({
+    type: 'replay_translation',
+    item_id: itemId,
+    text,
+    language,
+    voice: voiceSelect.value || 'Adrian'
+  }));
 }
 
 function handleJsonMessage(msg) {
@@ -873,6 +997,10 @@ function handleJsonMessage(msg) {
     case 'token':
       if (originalTextEl) originalTextEl.textContent = msg.original_text || '';
       if (translatedTextEl) translatedTextEl.textContent = msg.translated_text || '';
+      if (msg.auto_self_language_ignored && !autoSelfLanguageHintShown) {
+        autoSelfLanguageHintShown = true;
+        showToast('Auto listens for other languages. Select a target language to translate yours.');
+      }
       renderConversationItems(Array.isArray(msg.conversation_items)
         ? msg.conversation_items
         : legacyConversationItemsFromTokenMessage(msg));
@@ -926,6 +1054,9 @@ function handleJsonMessage(msg) {
       break;
     case 'error':
       console.error('Server chyba:', msg.message);
+      replayPendingCacheKeys.clear();
+      pendingReplayCacheKeysByItemId.clear();
+      renderConversationItems(conversationItems);
       setStatus(`Chyba: ${msg.message}`, 'error');
       showToast(msg.message || 'Chyba servera');
       break;
@@ -935,7 +1066,18 @@ function handleJsonMessage(msg) {
 }
 
 function handleAudioData(arrayBuffer) {
-  lastAudioBuffer = arrayBuffer.slice ? arrayBuffer.slice(0) : arrayBuffer;
+  const audioCopy = arrayBuffer.slice ? arrayBuffer.slice(0) : arrayBuffer;
+  lastAudioBuffer = audioCopy;
+  const replayItemId = String(lastAudioMeta?.replay_item_id || '');
+  if (replayItemId) {
+    const cacheKey = pendingReplayCacheKeysByItemId.get(replayItemId);
+    if (cacheKey) {
+      replayAudioCache.set(cacheKey, audioCopy.slice ? audioCopy.slice(0) : audioCopy);
+      replayPendingCacheKeys.delete(cacheKey);
+      pendingReplayCacheKeysByItemId.delete(replayItemId);
+      renderConversationItems(conversationItems);
+    }
+  }
   repeatLastBtn.disabled = false;
   audioQueue.push(arrayBuffer);
   if (!isPlaying) playNextAudio();
@@ -1064,6 +1206,10 @@ async function startTranslation() {
     audioChunksDropped = 0;
     audioQueue = [];
     isPlaying = false;
+    replayAudioCache.clear();
+    replayPendingCacheKeys.clear();
+    pendingReplayCacheKeysByItemId.clear();
+    autoSelfLanguageHintShown = false;
     renderConversationItems([]);
     resetPreReadyBuffer();
     stopCurrentAudioPlayback();
@@ -1155,6 +1301,10 @@ async function copyText(text, label) {
 function clearText() {
   if (originalTextEl) originalTextEl.textContent = '';
   if (translatedTextEl) translatedTextEl.textContent = '';
+  replayAudioCache.clear();
+  replayPendingCacheKeys.clear();
+  pendingReplayCacheKeysByItemId.clear();
+  autoSelfLanguageHintShown = false;
   renderConversationItems([]);
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'clear_text' }));
@@ -1213,8 +1363,8 @@ startBtn.addEventListener('click', () => {
 voiceSelect.addEventListener('change', sendSettingsUpdate);
 voiceOutputToggle.addEventListener('change', sendSettingsUpdate);
 if (outputModeSelect) outputModeSelect.addEventListener('change', () => { saveSettings(); updateModeChip(); sendSettingsUpdate(); });
-langASelect.addEventListener('change', () => { updateLanguageBadges(); saveSettings(); });
-langBSelect.addEventListener('change', () => { updateLanguageBadges(); saveSettings(); });
+langASelect.addEventListener('change', () => { updateLanguageBadges(); saveSettings(); renderConversationItems(conversationItems); });
+langBSelect.addEventListener('change', () => { updateLanguageBadges(); saveSettings(); renderConversationItems(conversationItems); });
 
 if (copyOriginalBtn && originalTextEl) {
   copyOriginalBtn.addEventListener('click', () => copyText(originalTextEl.textContent, 'Original'));

@@ -650,6 +650,42 @@ input:disabled {
   font-weight: 500;
 }
 
+.conversation-translation-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  align-items: start;
+  gap: 10px;
+}
+
+.conversation-replay-btn {
+  width: 38px;
+  height: 38px;
+  min-width: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 12px;
+  color: var(--primary);
+  background: rgba(99, 75, 255, 0.1);
+  cursor: pointer;
+}
+
+.conversation-replay-btn svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.conversation-replay-btn:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
 .conversation-actions {
   padding-top: 2px;
 }
