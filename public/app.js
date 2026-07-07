@@ -181,7 +181,7 @@ function updateLanguageBadges() {
       ? `Auto -> ${langAName}`
       : `${langAName} <-> ${langBName}`;
     const autoOption = Array.from(langBSelect.options || []).find((option) => option.value === 'auto');
-    if (autoOption) autoOption.textContent = `Auto -> ${langAName}`;
+    if (autoOption) autoOption.textContent = 'Auto';
   }
 }
 
