@@ -15,7 +15,7 @@ const { synthesizeRest } = require("./tts-rest");
 const { STT_MODEL, TTS_MODEL } = require("./runtime-models");
 const { normalizeTtsTransport } = require("./tts-transport");
 const { parseCookies, equal, validOrigin, clientIp, WindowLimiter } = require("./security");
-const APP_VERSION = "3.4.0";
+const APP_VERSION = "3.5.0";
 const COOKIE = "sl_session";
 const RESUME_WINDOW_MS = 5 * 60000;
 const MAX_LOGINS_PER_USER = 10;
@@ -76,6 +76,7 @@ function createApplication(env = process.env) {
     sessionTtsRequests: number(env, "MAX_TTS_REQUESTS_PER_SESSION", 120),
     sessionTtsBytes: number(env, "MAX_TTS_AUDIO_MB_PER_SESSION", 80) * 1024 * 1024,
     idleMs: number(env, "IDLE_TIMEOUT_SECONDS", 120) * 1000,
+    listenIdleMs: number(env, "LISTEN_IDLE_TIMEOUT_SECONDS", 300) * 1000,
   };
   const endpoint = {
     delay: number(env, "ENDPOINT_DELAY_MS", 1500, 500, 3000),

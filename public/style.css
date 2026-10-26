@@ -136,6 +136,18 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .lang-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; font-size: 0.95rem; }
 .swap-btn { width: 36px; height: 36px; border-radius: 999px; }
 .swap-btn svg { width: 18px; height: 18px; }
+.session-mode { margin: 0 16px 8px; }
+.session-mode button { min-height: 44px; }
+.session-mode button:disabled { opacity: 0.6; }
+.listen-options { display: flex; justify-content: center; gap: 28px; padding: 0 16px 8px; }
+.listen-options label { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; }
+.listen-options input { width: 20px; height: 20px; accent-color: var(--me); }
+.listen-arrow { order: 1; color: var(--muted); padding: 0 4px; }
+.app[data-mode="listen"] .lang-me { order: 2; justify-content: flex-end; text-align: right; }
+.app[data-mode="listen"] .lang-other { order: 0; justify-content: flex-start; text-align: left; }
+.app[data-mode="listen"] .lang-other .lang-code { order: 0; }
+.app[data-mode="listen"] #startBtn { grid-column: 2; }
+.app[data-mode="listen"] #stopAudioBtn { grid-column: 3; }
 
 /* Stage */
 .stage { position: relative; min-height: 0; display: flex; flex-direction: column; }
@@ -158,6 +170,16 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .turn-meta .audio { flex: 1; }
 .turn-meta .icon-btn { width: 30px; height: 30px; border-radius: 10px; color: var(--muted); }
 .turn-meta .icon-btn svg { width: 16px; height: 16px; fill: currentColor; stroke: none; }
+
+/* Live subtitles keep the translation first and emphasize the latest line. */
+.app[data-mode="listen"] .turn { max-width: 100%; width: 100%; background: transparent; border: 0; border-radius: 0; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.app[data-mode="listen"] .turn-tr { order: 0; font-size: 1.15rem; color: var(--text); }
+.app[data-mode="listen"] .turn.latest .turn-tr { font-size: clamp(1.6rem, 7vw, 2.4rem); line-height: 1.35; }
+.app[data-mode="listen"] .turn-src { order: 1; font-size: 0.8rem; overflow-wrap: anywhere; }
+.app[data-mode="listen"] .turn-meta { order: 2; }
+.app[data-mode="listen"] .turn-meta .dir { display: none; }
+.app[data-mode="listen"] .turn.live { border-left: 2px solid var(--me); padding-left: 12px; }
+.listen-calm { padding: 24px 16px; }
 
 /* Face to face */
 .face { position: absolute; inset: 0; display: grid; grid-template-rows: 1fr 1fr; gap: 10px; padding: 4px 16px 12px; background: var(--bg); }

@@ -21,6 +21,7 @@ class SpeechSession {
     this.suppressed = new Set(); this.pending = new Map(); this.queue = []; this.playback = null; this.localPlayback = null;
     this.preparingJob = null; this.audioGeneration = 0; this.prewarmed = new Set(); this.sentItems = new Map();
     this.languageA = "sk"; this.languageB = "de"; this.outputMode = "speaker"; this.ttsEnabled = true;
+    this.mode = "conversation"; this.listenSource = "auto"; this.finishReason = null;
     this.voiceA = "Adrian"; this.voiceB = "Adrian"; this.ttsSpeed = 1; this.stt = null; this.generation = 0;
     this.profileId = "conversation"; this.conversationMode = "auto"; this.pttActive = false; this.lastFinalizeAt = 0;
     this.acceptAudio = false; this.finishing = false; this.sttFinished = false;
@@ -33,7 +34,7 @@ class SpeechSession {
     this.synthesis = new SonioxTtsWebSocket({ url: this.urls.ttsWs, apiKey: this.apiKey, clientReferenceId: this.auth.username });
     this.configTimer = this.later(() => this.end("Konfigurácia neprišla včas."), 12000);
     this.scheduleExpiry();
-    this.limitTimer = this.later(() => this.stop(), this.limits.sessionMs);
+    this.limitTimer = this.later(() => this.stop("limit"), this.limits.sessionMs);
     this.heartbeat = setInterval(() => {
       if (!this.isAlive) { this.close(); client.terminate(); return; }
       this.isAlive = false; client.ping();
@@ -41,7 +42,7 @@ class SpeechSession {
     this.tick = setInterval(() => this.guard(() => {
       this.frameCount = 0;
       if (this.closed) return;
-      if (!this.finishing && Date.now() - this.lastActivity > this.limits.idleMs && !this.playback) { this.stop(); return; }
+      if (!this.finishing && Date.now() - this.lastActivity > this.idleMs() && !this.playback) { this.stop("idle"); return; }
       if (this.stt?.readyState === WebSocket.OPEN && !this.sttFinished) {
         if (!this.reserve({ sttSeconds: 10 })) return;
         if (this.needsKeepalive()) this.stt.send(JSON.stringify({ type: "keepalive" }));
@@ -81,8 +82,10 @@ class SpeechSession {
     catch { this.end("Účtovanie spotreby nie je dostupné.", "usage_unavailable"); return false; }
     this.end("Denný limit bol vyčerpaný.", "quota_exceeded"); return false;
   }
-  muted() { return this.outputMode === "speaker" && Boolean(this.playback?.audioStarted || this.localPlayback); }
-  guardEcho() { if (this.outputMode === "speaker") this.echoUntil = Date.now() + ECHO_GUARD_MS; }
+  idleMs() { return this.mode === "listen" ? this.limits.listenIdleMs ?? 300000 : this.limits.idleMs; }
+  fullDuplex() { return this.mode === "listen" || this.outputMode === "headphones"; }
+  muted() { return !this.fullDuplex() && Boolean(this.playback?.audioStarted || this.localPlayback); }
+  guardEcho() { if (!this.fullDuplex()) this.echoUntil = Date.now() + ECHO_GUARD_MS; }
   sendAudio(op, buffer) {
     if (this.outboxBytes + buffer.length > OUTBOX_MAX_BYTES) throw Object.assign(new Error("slow client"), { errorCode: "client_unavailable" });
     this.outbox.push({ op, buffer }); this.outboxBytes += buffer.length;
@@ -133,6 +136,7 @@ class SpeechSession {
   validSettings(msg) {
     if (msg.language_a !== undefined && !this.catalog.hasLanguage(msg.language_a)) return false;
     if (msg.language_b !== undefined && msg.language_b !== "auto" && !this.catalog.hasLanguage(msg.language_b)) return false;
+    if (msg.listen_source !== undefined && msg.listen_source !== "auto" && !this.catalog.hasLanguage(msg.listen_source)) return false;
     if (msg.profile_id !== undefined && !contextFor(msg.profile_id)) return false;
     return [msg.voice_a, msg.voice_b, msg.tts_voice].filter(Boolean).every(v => this.catalog.hasVoiceFor(this.auth.username, v));
   }
@@ -143,11 +147,13 @@ class SpeechSession {
       if (this.configured || !this.validSettings(msg)) { this.end("Neplatná konfigurácia."); return; }
       this.configured = true; clearTimeout(this.configTimer);
       this.languageA = msg.language_a || "sk"; this.languageB = msg.language_b || "de";
-      if (this.languageA === this.languageB) { this.end("Vyber dva rôzne jazyky."); return; }
+      this.mode = msg.mode || "conversation"; this.listenSource = msg.listen_source || "auto";
+      if ((this.mode === "conversation" && this.languageA === this.languageB) || this.listenSource === this.languageA) { this.end("Vyber dva rôzne jazyky."); return; }
       this.voiceA = msg.voice_a || msg.tts_voice || "Adrian"; this.voiceB = msg.voice_b || msg.tts_voice || "Adrian";
       this.ttsSpeed = msg.tts_speed !== undefined ? Number(msg.tts_speed) : 1;
       this.ttsEnabled = msg.tts_enabled !== false; this.outputMode = msg.output_mode || "speaker";
       this.profileId = msg.profile_id || "conversation"; this.conversationMode = msg.conversation_mode || "auto";
+      if (this.mode === "listen") this.conversationMode = "auto";
       this.startStt(); return;
     }
     if (!this.configured) { this.end("Najprv odošli konfiguráciu."); return; }
@@ -176,7 +182,7 @@ class SpeechSession {
       this.send({ type: "local_playback_ready", playback_id: msg.playback_id });
       this.localTimer = this.later(() => { this.localPlayback = null; this.state(); this.pump(); }, 120000); return;
     }
-    if (msg.type === "confirm_language") {
+    if (msg.type === "confirm_language" && this.mode !== "listen") {
       if (!this.candidate || !this.catalog.hasLanguage(msg.language) || msg.language === this.languageA) return;
       this.languageB = msg.language; this.candidate = null; this.pending.clear();
       this.switching = true; this.acceptAudio = false; this.state();
@@ -222,10 +228,11 @@ class SpeechSession {
     const timer = this.later(() => { if (current()) this.end("Rozpoznávanie sa nepripojilo včas.", "stt_timeout"); }, 10000);
     socket.on("open", () => this.guard(() => {
       if (!current()) { socket.close(); return; } clearTimeout(timer);
-      const auto = this.languageB === "auto";
+      const listen = this.mode === "listen", auto = listen || this.languageB === "auto";
+      const hints = listen ? (this.listenSource === "auto" ? [] : [this.listenSource]) : auto ? [] : [this.languageA, this.languageB];
       socket.send(JSON.stringify({
         model: STT_MODEL, audio_format: "pcm_s16le", sample_rate: 16000, num_channels: 1, client_reference_id: this.auth.username,
-        ...(!auto ? { language_hints: [this.languageA, this.languageB] } : {}),
+        ...(hints.length ? { language_hints: hints } : {}),
         enable_language_identification: true, enable_endpoint_detection: true,
         max_endpoint_delay_ms: this.endpoint.delay, endpoint_sensitivity: this.endpoint.sensitivity,
         endpoint_latency_adjustment_level: this.endpoint.level,
@@ -234,7 +241,7 @@ class SpeechSession {
       }));
       this.acceptAudio = true; this.send({ type: "server_ready" }); this.state();
       // Open the TTS connection early; streams are prewarmed per utterance because idle streams expire.
-      if (this.ttsEnabled && !auto && this.transport !== "rest") void this.synthesis.connect().catch(() => {});
+      if (this.ttsEnabled && (listen || !auto) && this.transport !== "rest") void this.synthesis.connect().catch(() => {});
     }));
     socket.on("message", raw => this.guard(() => {
       if (!current()) return;
@@ -257,25 +264,25 @@ class SpeechSession {
     if (!Array.isArray(tokens)) return;
     clearConversationNonFinalText(this.timeline);
     for (const token of tokens) {
-      if (this.timeline.items.length >= 990) { this.send({ type: "error", code: "transcript_overload", message: "Rozhovor je plný. Ulož ho a začni nový; posledná časť sa nemusela zachovať." }); this.stop(); break; }
+      if (this.timeline.items.length >= 990) { this.send({ type: "error", code: "transcript_overload", message: "Rozhovor je plný. Ulož ho a začni nový; posledná časť sa nemusela zachovať." }); this.stop("error"); break; }
       if (!token || typeof token.text !== "string") continue;
       if (token.text === "<end>" || token.text === "<fin>") {
         const item = markConversationEndpoint(this.timeline);
         if (item) this.endpointTimes.set(item.id, Date.now());
         this.flushPending();
-        if (this.languageB === "auto" && item?.source_language && item.source_language !== this.languageA && this.catalog.hasLanguage(item.source_language)) {
+        if (this.mode !== "listen" && this.languageB === "auto" && item?.source_language && item.source_language !== this.languageA && this.catalog.hasLanguage(item.source_language)) {
           this.candidate = item.source_language; this.acceptAudio = false;
           this.send({ type: "language_candidate", language: this.candidate }); this.state();
         }
         continue;
       }
-      const result = appendConversationToken(this.timeline, token, { languageA: this.languageA, languageB: this.languageB });
+      const result = appendConversationToken(this.timeline, token, { languageA: this.languageA, languageB: this.mode === "listen" ? "auto" : this.languageB });
       if (result.ignored) continue;
       if (token.translation_status === "translation" && !token.is_final) this.prewarmFor(result.item, token.language);
       if (token.is_final) this.lastActivity = Date.now();
       if (result.tts_text) {
         if (this.suppressed.has(result.item.id)) continue;
-        if (this.languageB === "auto" || !this.ttsEnabled) { this.audioStates.set(result.item.id, "text_only"); continue; }
+        if ((this.mode !== "listen" && this.languageB === "auto") || !this.ttsEnabled) { this.audioStates.set(result.item.id, "text_only"); continue; }
         const id = result.item.id;
         // A Soniox TTS stream belongs to one utterance and one translation direction.
         for (const [otherId] of this.pending) if (otherId !== id) this.flushOne(otherId);
@@ -283,7 +290,7 @@ class SpeechSession {
       }
     }
     if (this.timeline.items.reduce((n, i) => n + i.source_text.length + i.translated_text.length, 0) > 40000 || this.timeline.items.length >= 990) {
-      this.send({ type: "error", message: "Rozhovor je dlhý. Ulož ho a začni nový." }); this.stop();
+      this.send({ type: "error", message: "Rozhovor je dlhý. Ulož ho a začni nový." }); this.stop("error");
     }
     this.updateItems(); this.state();
   }
@@ -296,8 +303,8 @@ class SpeechSession {
     this.end("Rozpoznávanie nie je dostupné.", "stt_provider_error");
   }
   prewarmFor(item, language) {
-    // Only streamed headphone playback starts before <end>; speaker playback gains nothing from a prewarm.
-    if (!item || this.outputMode !== "headphones" || !this.ttsEnabled || this.languageB === "auto" || this.transport === "rest" || Date.now() < this.restUntil) return;
+    // Full-duplex playback starts before <end> and benefits from a prewarm.
+    if (!item || !this.fullDuplex() || !this.ttsEnabled || (this.mode !== "listen" && this.languageB === "auto") || this.transport === "rest" || Date.now() < this.restUntil) return;
     if (this.prewarmed.has(item.id) || this.pending.has(item.id) || !this.catalog.canSpeak(language)) return;
     this.prewarmed.add(item.id);
     if (this.prewarmed.size > 200) this.prewarmed.delete(this.prewarmed.values().next().value);
@@ -319,7 +326,7 @@ class SpeechSession {
       this.send({ type: "error", code: "voice_overload", message: "Výpoveď je pre hlas príliš dlhá. Preklad zostáva v texte." }); return;
     }
     job.text += text; job.parts.push(text); this.notifyJob(job);
-    if (this.outputMode === "headphones") this.queueJob(job);
+    if (this.fullDuplex()) this.queueJob(job);
   }
   queueJob(job) {
     if (job.queued || this.closed || !this.ttsEnabled) return;
@@ -490,8 +497,9 @@ class SpeechSession {
     this.timings.push({ endpoint_to_playback_ack_ms: op.audibleAt && this.endpointTimes.has(op.job.itemId) ? op.audibleAt - this.endpointTimes.get(op.job.itemId) : null, transport: op.transport, first_audio_ms: op.firstAudioMs ?? null, endpoint_to_audio_ms: this.endpointTimes.has(op.job.itemId) ? op.started + (op.firstAudioMs || 0) - this.endpointTimes.get(op.job.itemId) : null });
     this.timings = this.timings.slice(-100); this.updateItems(); this.state(); this.pump();
   }
-  stop() {
+  stop(reason = "client_stop") {
     if (this.finishing || this.closed) return;
+    this.finishReason = reason;
     this.finishing = true; this.acceptAudio = false; this.state();
     if (this.stt?.readyState === WebSocket.OPEN) this.stt.send("");
     else { this.sttFinished = true; this.flushPending(); this.maybeFinish(); }
@@ -505,13 +513,14 @@ class SpeechSession {
   maybeFinish() {
     if (!this.closed && (this.finishing || this.sttFinished) && this.sttFinished && !this.playback && !this.preparingJob && !this.queue.length) {
       this.endCode = "finished";
-      this.send({ type: "session_finished", summary: this.snapshot() }); this.close(); this.client.close(1000);
+      this.send({ type: "session_finished", reason: this.finishReason || "error", summary: this.snapshot() }); this.close(); this.client.close(1000);
     }
   }
   end(message, code = "session_error") {
     if (this.closed) return;
     this.endCode = code;
     this.send({ type: "error", code, message, fatal: true });
+    this.send({ type: "session_finished", reason: "error", summary: this.snapshot() });
     this.close(); this.client.close(4000, code);
   }
   close() {
