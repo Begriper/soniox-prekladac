@@ -43,9 +43,13 @@ test("two directions remain separate; stale playback acknowledgement cannot rele
   await until(()=>!session.playback);
   f.turn(f.state.stt[0],true);
   await until(()=>ws.messages.filter(m=>m.type==="tts_stream_end").length===2);
-  const items=ws.messages.filter(m=>m.type==="token").at(-1).conversation_items;
+  const byId=new Map();
+  for (const m of ws.messages.filter(m=>m.type==="token")) for (const i of m.conversation_items) byId.set(i.id,i);
+  const items=[...byId.values()];
   assert.deepEqual(items.map(i=>[i.source_language,i.target_language]),[["sk","de"],["de","sk"]]);
   assert.equal(items.length,2); assert.ok(ws.audio.length>=2);
+  const last=ws.messages.filter(m=>m.type==="token").at(-1);
+  assert.ok(last.conversation_items.length<2, "updates carry only changed items");
 });
 test("auto mode is silent until confirmation opens fixed two-way pair", async t => {
   const f=await setup(t), cookie=await f.login(), ws=await f.connect(cookie,{language_a:"sk",language_b:"auto"});

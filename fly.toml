@@ -17,6 +17,15 @@ primary_region = "fra"
   auto_start_machines = true
   min_machines_running = 1
   processes = ["app"]
+
+  # Fly marks the Machine unhealthy when /health stops answering.
+  [[http_service.checks]]
+    grace_period = "15s"
+    interval = "30s"
+    timeout = "5s"
+    method = "GET"
+    path = "/health"
+
 [[mounts]]
   source = "translator_data"
   destination = "/data"

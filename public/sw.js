@@ -1,6 +1,6 @@
 'use strict';
-const CACHE = 'translator-shell-v3-1';
-const SHELL = ['/', '/index.html', '/style.css', '/app.js', '/history.js', '/audio-capture-worklet.js', '/manifest.webmanifest', '/icon.svg'];
+const CACHE = 'translator-shell-v3-2';
+const SHELL = ['/', '/index.html', '/style.css', '/app.js', '/history.js', '/audio-capture-worklet.js', '/manifest.webmanifest', '/icon.svg', '/icon-180.png', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/fonts/Manrope-variable.ttf'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL))));
 self.addEventListener('activate', event => event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith('translator-shell-') && k !== CACHE).map(k => caches.delete(k))))));
 self.addEventListener('fetch', event => {

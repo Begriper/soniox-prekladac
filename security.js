@@ -29,8 +29,8 @@ function parseMessage(data) {
   try { msg = JSON.parse(String(data)); } catch { return null; }
   if (!msg || Array.isArray(msg) || typeof msg !== "object" || typeof msg.type !== "string") return null;
   const fields = {
-    config: ["language_a", "language_b", "tts_voice", "voice_a", "voice_b", "output_mode", "profile_id", "conversation_mode"],
-    update_settings: ["voice_a", "voice_b", "output_mode"],
+    config: ["language_a", "language_b", "tts_voice", "voice_a", "voice_b", "output_mode", "profile_id", "conversation_mode", "tts_speed"],
+    update_settings: ["voice_a", "voice_b", "output_mode", "tts_speed"],
     confirm_language: ["language"], playback_started: ["playback_id"], playback_done: ["playback_id", "status"],
     local_playback_start: ["playback_id"], local_playback_end: ["playback_id"],
     replay_translation: ["item_id"], stop_audio: ["request_id"], client_stop: [], clear_text: [], ptt_start: [], ptt_end: [],
@@ -42,6 +42,8 @@ function parseMessage(data) {
   if (msg.tts_enabled !== undefined && typeof msg.tts_enabled !== "boolean") return null;
   if (msg.conversation_mode !== undefined && !["auto", "ptt"].includes(msg.conversation_mode)) return null;
   if (msg.output_mode !== undefined && !["speaker", "headphones"].includes(msg.output_mode)) return null;
+  // Soniox tts-rt-v2 accepts speed 0.7–1.3.
+  if (msg.tts_speed !== undefined && !(Number(msg.tts_speed) >= 0.7 && Number(msg.tts_speed) <= 1.3)) return null;
   return msg;
 }
 class WindowLimiter {

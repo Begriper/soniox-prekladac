@@ -1,4 +1,4 @@
-# Soniox prekladač — 3.0.0
+# Soniox prekladač — 3.2.0
 
 Súkromná rodinná webová aplikácia: obojsmerný hovorený preklad na jednom telefóne. Vanilla HTML/CSS/JavaScript, Express, Soniox STT v5 a TTS v2. Implementácia je pripravená na lokálne overenie; produkcia sa v tejto úlohe nenasadzovala.
 
@@ -19,12 +19,12 @@ Bez externých API môžeš spustiť node scripts/mock-app.cjs a otvoriť http:/
 
 ## Používanie
 
-- Vyber svoj jazyk a jazyk druhej osoby. „Rozpoznať jazyk“ najprv potichu prepíše/preloží cudziu výpoveď a vyžiada potvrdenie. Potom otvorí obojsmernú konverzáciu.
-- „Počúvať“ zapne mikrofón. „Zastaviť počúvanie“ odošle zvyšok audia a dokončí posledný preklad. „Zastaviť hlas“ okamžite ruší aj čakajúcu syntézu.
-- Reproduktor je bezpečný predvolený režim. Slúchadlá vyber výslovne v nastaveniach. Dostupné sú samostatné hlasy oboch smerov, mužský/ženský filter, textový režim a zobrazenie oproti sebe.
-- História sa ukladá výhradne tlačidlom „Uložiť rozhovor“ do IndexedDB aktuálneho zariadenia a používateľa. Podporuje otvorenie, kopírovanie, textový export a vymazanie. Audio zostáva iba v obmedzenej pamäťovej cache.
-- Nový rozhovor upozorní na neuložený obsah. Po prerušení internetu zostane prepis v otvorenej karte; obnovenie nespúšťa staré audio znova.
-- Po zamknutí alebo opustení stránky obnov počúvanie. PWA neposkytuje offline preklad ani garantovaný beh na pozadí.
+- Hore je pás jazykov: ťuknutím na jazyk otvoríš výber (naposledy použité, vyhľadávanie). Pre druhú osobu môžeš zvoliť „Rozpoznať jazyk“; prvú vetu potom potvrdíš a rozhovor pokračuje obojsmerne.
+- Veľké tlačidlo mikrofónu spúšťa a zastavuje rozhovor. Pri zastavení sa dokončí posledný preklad. Tlačidlo vpravo okamžite ticho zastaví prehrávaný hlas, tlačidlo vľavo prepína zobrazenie „oproti sebe“ (horná polovica otočená pre druhú osobu).
+- V menu „⋯“ je nový rozhovor, uloženie, kopírovanie, uložené rozhovory a Nastavenia: mikrofón (Automaticky / Podržať), zvuk (Reproduktor / Slúchadlá / Iba text), rýchlosť hlasu, prostredie a hlasy oboch strán.
+- Reproduktor je bezpečný predvolený režim a obnoví sa pri každom spustení; slúchadlá nechávajú mikrofón otvorený aj počas hlasu.
+- História sa ukladá iba na požiadanie do IndexedDB tohto zariadenia a používateľa. Audio zostáva iba v obmedzenej pamäťovej cache.
+- Pri výpadku siete sa aplikácia trikrát pokúsi pripojiť znova a prepis zostane. Po prepnutí do inej aplikácie sa rozhovor pozastaví a pokračuje jedným ťuknutím. PWA neposkytuje offline preklad ani beh na pozadí.
 
 ## Prevádzka a bezpečnosť
 
@@ -47,7 +47,15 @@ Použi **jednu aplikačnú Machine**: nezávislé volumes na viacerých Machines
 
 Staré nastavenia MAX_TTS_QUEUE, MAX_TTS_CHARS, MAX_TEXT_CHARS, MAX_WS_MESSAGE_KB, TTS_PLAYBACK_TIMEOUT_SECONDS a pomocné timeout premenné už nemenia pevné bezpečnostné limity. Aktuálne podporované hodnoty sú v .env.example. Zmena modelu je centrálne v runtime-models.js.
 
-## Modernizácia 3.1 (pripravená na staging)
+## Verzia 3.2
+
+- Soniox kľúč sa posiela v hlavičke `Authorization` pri pripojení (STT aj TTS). Soniox od 15. 1. 2027 odmietne kľúč poslaný iba v konfiguračnej správe.
+- PTT posiela keepalive aj keď nikto nedrží tlačidlo; predtým Soniox ukončil stream po 20 s.
+- TTS: spojenie sa otvára pri štarte, stream sa predhrieva pre konkrétnu výpoveď (slúchadlá) a nikdy sa nepoužije prewarm starší ako 2 s. Pauza 2 s uprostred vety uzavrie stream, zvyšok pokračuje novým.
+- Prepis cez WebSocket posiela iba zmenené položky. Rýchlosť hlasu (`speed`) a `client_reference_id` = používateľ (v Soniox usage logoch vidno, kto koľko minul).
+- Nové mobilné rozhranie, PNG ikony pre plochu, automatické obnovenie spojenia. Podrobnosti: [hĺbková analýza](analysis/deep-analysis-2026-10-26.md).
+
+## Modernizácia 3.1
 
 - Nastav `APP_OWNER_USERNAME` na presné používateľské meno vlastníka z `APP_ACCESS_CODES`. Voliteľné `APP_OWNER_VOICE_NAME` je predvolene `my voice`. Aplikácia ukáže klon iba po zistení platného UUID a stavu `ready` pre `tts-rt-v2` v projekte priradenom k `SONIOX_API_KEY`.
 - `/api/voices` načíta všetky stránky `/v1/shared-voices` a zoznam vlastných hlasov. Pri nedostupnom API zostanú vstavané hlasy z posledného modelového katalógu; klon sa zamietne.

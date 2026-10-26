@@ -12,7 +12,7 @@ const { synthesizeRest } = require("./tts-rest");
 const { STT_MODEL, TTS_MODEL } = require("./runtime-models");
 const { normalizeTtsTransport } = require("./tts-transport");
 const { parseCookies, equal, validOrigin, clientIp, WindowLimiter } = require("./security");
-const APP_VERSION = "3.1.0";
+const APP_VERSION = "3.2.0";
 const COOKIE = "sl_session";
 function number(env, key, fallback, min = 1, max = 1e12) {
   const value = Number(env[key] ?? fallback);
@@ -24,7 +24,7 @@ function createApplication(env = process.env) {
   if (!env.SONIOX_API_KEY) throw new Error("SONIOX_API_KEY is required");
   const secret = env.SESSION_SECRET || (production ? "" : crypto.randomBytes(32).toString("hex"));
   if (secret.length < 32) throw new Error("SESSION_SECRET must contain at least 32 characters");
-  const users = (env.APP_ACCESS_CODES || (env.APP_ACCESS_KEY ? "owner:" + env.APP_ACCESS_KEY : "")).split(",").filter(Boolean).map(part => {
+  const users = (env.APP_ACCESS_CODES || "").split(",").filter(Boolean).map(part => {
     const i = part.indexOf(":");
     const username = part.slice(0, i).trim(), code = part.slice(i + 1).trim();
     if (i < 1 || !/^[\w.-]{1,40}$/.test(username) || code.length < 16) throw new Error("Use unique access codes of at least 16 characters");

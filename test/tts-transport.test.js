@@ -14,9 +14,10 @@ class MockWebSocket extends EventEmitter {
   static CLOSED = 3;
   static instances = [];
 
-  constructor(url) {
+  constructor(url, options = {}) {
     super();
     this.url = url;
+    this.options = options;
     this.readyState = MockWebSocket.CONNECTING;
     this.sent = [];
     MockWebSocket.instances.push(this);
@@ -72,6 +73,8 @@ test("prewarm config is reused and PCM chunks are streamed before termination", 
   assert.equal(config.audio_format, "pcm_s16le");
   assert.equal(config.sample_rate, 24000);
   assert.equal(config.language, "de");
+  assert.equal(socket.options.headers.Authorization, "Bearer test-key");
+  assert.equal("api_key" in config, false);
 
   const audioChunks = [];
   const synthesis = client.synthesize({
@@ -219,4 +222,21 @@ test("late error from cancelled stream cannot fail the next synthesis", async ()
   ws.receive({stream_id:id,audio:Buffer.from([1,2]).toString("base64")});
   ws.receive({stream_id:id,terminated:true});
   assert.equal((await next).audioBytes,2);client.close();
+});
+
+test("an expired prewarm is cancelled and never receives synthesis text", async () => {
+  const client = createClient({ prewarmMaxAgeMs: -1 });
+  await client.prewarm([{ language: "de", voice: "Adrian" }]);
+  const socket = MockWebSocket.instances[0];
+  const prewarmId = socket.sent[0].stream_id;
+  const synthesis = client.synthesize({ text: "Guten Tag", language: "de", voice: "Adrian" });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.ok(socket.sent.some((m) => m.stream_id === prewarmId && m.cancel === true));
+  const text = socket.sent.find((m) => m.text === "Guten Tag");
+  assert.notEqual(text.stream_id, prewarmId);
+  socket.receive({ stream_id: text.stream_id, audio: Buffer.from([1, 2]).toString("base64") });
+  socket.receive({ stream_id: text.stream_id, terminated: true });
+  await synthesis;
+  client.close();
 });

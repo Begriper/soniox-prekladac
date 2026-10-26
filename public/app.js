@@ -1,36 +1,46 @@
 "use strict";
 const $ = id => document.getElementById(id);
 let user = null, languages = [], voices = [], socket = null, conversationId = "", epoch = 0;
-let running = false, stopping = false, ready = false, muted = false, dirty = false;
-let media = null, captureContext = null, worklet = null, processor = null, wakeLock = null, flushResolve = null;
+let running = false, stopping = false, ready = false, muted = false, dirty = false, serverState = "idle";
+let media = null, captureContext = null, worklet = null, wakeLock = null, flushResolve = null;
 let playbackContext = null, playback = null, localPlayback = null, previewAbort = null;
 let entries = [], nodes = new Map(), audioCache = new Map(), audioCacheBytes = 0, ttsModel = "tts-rt-v2";
-let chosenA = "sk", chosenB = "de", currentVoiceA = "Adrian", currentVoiceB = "Adrian";
-let toastTimer, connectTimer, finishTimer, cancelRequest = "";
+let chosenA = "sk", chosenB = "de", voiceA = "Adrian", voiceB = "Adrian";
+let toastTimer, connectTimer, finishTimer, reconnectTimer, cancelRequest = "";
 let pttPressed = false, pttSide = "", pttEnding = false, vadHits = 0;
+let reconnectAttempts = 0, resumePending = false, faceMode = false;
+let languageSide = "A", voiceSide = "A", voiceGender = "";
+const prefs = { conversationMode: "auto", outputMode: "speaker", ttsSpeed: "1", profileId: "conversation" };
 const MAX_CACHE = 12 * 1024 * 1024;
-const settings = {
+const RECONNECTABLE = new Set(["stt_connection", "stt_timeout"]);
+const STATE_LABELS = { idle: "Pripravený", connecting: "Pripájam…", listening: "Počúvam", translating: "Prekladám", speaking: "Hovorím", finishing: "Dokončujem preklad…", confirm_language: "Potvrď jazyk", reconnecting: "Obnovujem spojenie…", paused: "Pozastavené" };
+const AUDIO_LABELS = { pending: "Čaká", queued: "Vo fronte", played: "Prehrané", interrupted: "Prerušené", not_spoken: "Neprehrané", text_only: "Iba text" };
+const store = {
   get(key, fallback) { try { return localStorage.getItem("translator." + key) ?? fallback; } catch { return fallback; } },
   set(key, value) { try { localStorage.setItem("translator." + key, value); } catch {} },
 };
 
-function toast(message) { $("toast").textContent = message; $("toast").hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $("toast").hidden = true, 3500); }
-
-function error(message) { $("errorBanner").textContent = message; $("errorBanner").hidden = !message; }
-
-function status(text, active = false) { $("status").textContent = text; $("statusDot").classList.toggle("active", active); }
-
-function name(code) { return languages.find(l => l.code === code)?.name || (code === "auto" ? "Rozpoznať jazyk" : code); }
-
-function textOnly() { return $("textOnly").checked; }
+/* ---------- small helpers ---------- */
+function toast(message) { const t = $("toast"); t.textContent = message; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => t.hidden = true, 3200); }
+function error(message) { $("errorText").textContent = message || ""; $("errorBanner").hidden = !message; }
+function haptic() { try { navigator.vibrate?.(12); } catch {} }
+function name(code) { return code === "auto" ? "Rozpoznať jazyk" : languages.find(l => l.code === code)?.name || code; }
+function shortCode(code) { return code === "auto" ? "?" : String(code).toUpperCase(); }
+function ttsEnabled() { return prefs.outputMode !== "text"; }
+function outputMode() { return prefs.outputMode === "headphones" ? "headphones" : "speaker"; }
+function capitalize(text) { return text ? text[0].toLocaleUpperCase("sk") + text.slice(1) : text; }
+function el(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
+function icon(id) { const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); const use = document.createElementNS("http://www.w3.org/2000/svg", "use"); use.setAttribute("href", "#" + id); svg.append(use); return svg; }
+function openSheet(id) { const d = $(id); if (!d.open) d.showModal(); }
+function closeSheets() { for (const d of document.querySelectorAll("dialog[open]")) d.close(); }
 
 function saveSettings() {
-  settings.set("langA", chosenA); settings.set("langB", chosenB);
-  settings.set("voiceA", currentVoiceA); settings.set("voiceB", currentVoiceB);
-  settings.set("ttsEnabled", String(!textOnly())); settings.set("outputMode", $("outputMode").value);
-  settings.set("profileId", $("profileId").value); settings.set("conversationMode", $("conversationMode").value);
-  const recent = [chosenA, chosenB, ...settings.get("recent", "").split(",")].filter(c => c && c !== "auto");
-  settings.set("recent", [...new Set(recent)].slice(0, 6).join(","));
+  store.set("langA", chosenA); store.set("langB", chosenB); store.set("voiceA", voiceA); store.set("voiceB", voiceB);
+  store.set("conversationMode", prefs.conversationMode); store.set("outputMode", prefs.outputMode);
+  store.set("ttsSpeed", prefs.ttsSpeed); store.set("profileId", prefs.profileId);
+  store.set("ttsEnabled", String(ttsEnabled()));
+  const recent = [chosenA, chosenB, ...store.get("recent", "").split(",")].filter(c => c && c !== "auto");
+  store.set("recent", [...new Set(recent)].slice(0, 6).join(","));
 }
 
 async function api(url, options = {}) {
@@ -42,82 +52,146 @@ async function api(url, options = {}) {
   }
   return response.json();
 }
-
 function send(data) { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(data)); }
 
+/* ---------- UI state ---------- */
 function controls() {
-  const ptt = $("conversationMode").value === "ptt";
-  $("appShell").classList.toggle("is-running", running);
-  $("appShell").classList.toggle("is-ptt", ptt);
-  const activePair = $("activeLanguagePair");
-  if (activePair) activePair.textContent = name(chosenA) + "  ↔  " + name(chosenB);
-  $("startBtn").textContent = stopping ? "Dokončujem…" : running ? "Zastaviť počúvanie" : entries.length ? "Obnoviť počúvanie" : ptt ? "Spustiť PTT" : "Počúvať";
-  $("startBtn").disabled = stopping || !navigator.onLine;
-  for (const id of ["langA", "langB", "searchA", "searchB", "swapBtn", "profileId", "conversationMode"]) $(id).disabled = running || stopping;
-  $("pttButtons").hidden = !ptt || !running;
-  for (const id of ["pttA", "pttB"]) $(id).disabled = !running || !ready || stopping || pttEnding;
-  $("pttA").textContent = "Podrž · " + name(chosenA); $("pttB").textContent = "Podrž · " + name(chosenB);
-  $("stopAudioBtn").disabled = !running && !playback && !localPlayback && !previewAbort;
-  $("micHint").textContent = !running ? "Mikrofón je vypnutý." : muted ? "Mikrofón počas hlasu neposiela zvuk." : !ready ? "Počkaj, kým sa zobrazí Počúvam." : ptt ? pttPressed ? "Hovor. Po pustení tlačidla sa výpoveď dokončí." : "Podrž tlačidlo svojho jazyka a hovor." : "Mikrofón počúva. Hovorí vždy jedna osoba.";
-  $("modeLabel").textContent = textOnly() ? "Iba text" : $("outputMode").value === "speaker" ? "Reproduktor" : "Slúchadlá";
+  const app = $("appShell"), ptt = prefs.conversationMode === "ptt";
+  const state = stopping ? "finishing" : reconnectTimer ? "reconnecting" : running ? (serverState === "idle" ? "connecting" : serverState) : resumePending ? "paused" : "idle";
+  app.dataset.state = state;
+  app.classList.toggle("is-running", running);
+  $("status").textContent = STATE_LABELS[state] || STATE_LABELS.idle;
+  $("modeLabel").textContent = (ttsEnabled() ? outputMode() === "speaker" ? "Reproduktor" : "Slúchadlá" : "Iba text") + (ptt ? " · Podržať" : "");
+  $("langACode").textContent = shortCode(chosenA); $("langAName").textContent = capitalize(name(chosenA));
+  $("langBCode").textContent = shortCode(chosenB); $("langBName").textContent = capitalize(name(chosenB));
+  for (const id of ["langABtn", "langBBtn"]) $(id).disabled = running || stopping;
+  $("swapBtn").disabled = running || stopping || chosenB === "auto";
+  const mic = $("startBtn");
+  mic.disabled = stopping || (!navigator.onLine && !running);
+  mic.setAttribute("aria-label", running ? "Zastaviť rozhovor" : entries.length ? "Pokračovať v rozhovore" : "Počúvať");
+  $("autoControls").hidden = running && ptt;
+  $("pttControls").hidden = !(running && ptt);
+  for (const id of ["pttA", "pttB"]) $(id).disabled = !ready || stopping || pttEnding;
+  $("pttEndBtn").disabled = stopping;
+  $("pttALabel").textContent = capitalize(name(chosenA)); $("pttBLabel").textContent = capitalize(name(chosenB));
+  $("stopAudioBtn").disabled = !playback && !localPlayback && !previewAbort;
+  $("resumeBar").hidden = running || !resumePending || !entries.length;
+  $("faceBtn").setAttribute("aria-pressed", String(faceMode));
+  $("facePanel").hidden = !faceMode;
+  $("feed").hidden = faceMode;
+  for (const group of document.querySelectorAll(".segmented")) {
+    const value = prefs[group.dataset.setting];
+    for (const b of group.querySelectorAll("button")) {
+      b.setAttribute("aria-checked", String(b.dataset.value === value));
+      b.disabled = group.dataset.setting === "conversationMode" && (running || stopping);
+    }
+  }
+  $("profileId").value = prefs.profileId; $("profileId").disabled = running || stopping;
+  $("settingsLockHint").hidden = !(running || stopping);
+  $("voiceALabel").textContent = "Môj jazyk · " + capitalize(name(chosenA));
+  $("voiceBLabel").textContent = "Druhá osoba · " + capitalize(name(chosenB === "auto" ? chosenA : chosenB));
+  $("voiceAValue").textContent = voices.find(v => v.id === voiceA)?.name || voiceA;
+  $("voiceBValue").textContent = voices.find(v => v.id === voiceB)?.name || voiceB;
+  $("emptyTitle").textContent = running && ptt ? "Podrž tlačidlo svojho jazyka" : "Ťukni na mikrofón a hovor";
+  $("emptySub").textContent = ttsEnabled() ? "Preklad sa zobrazí tu a prečíta nahlas." : "Preklad sa zobrazí tu.";
 }
 
-function addOption(parent, code, label) { const o = document.createElement("option"); o.value = code; o.textContent = label; parent.append(o); }
-
-function fillLanguages(select, selected, search = "", auto = false) {
-  const term = search.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
-  const matches = l => (l.name + " " + l.native_name + " " + l.code).normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase().includes(term);
-  select.replaceChildren();
-  if (auto) addOption(select, "auto", "Rozpoznať jazyk");
-  const recent = settings.get("recent", "").split(",");
+/* ---------- sheets: languages ---------- */
+function normalize(text) { return String(text).normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase(); }
+function languageOption(code, title, sub, selected) {
+  const b = el("button", "option"); b.type = "button"; b.setAttribute("role", "option"); b.setAttribute("aria-selected", String(selected));
+  const main = el("span", "option-main"); main.append(el("span", "option-title", title)); if (sub) main.append(el("span", "option-sub", sub));
+  const check = icon("i-check"); check.classList.add("check");
+  b.append(main, check);
+  b.addEventListener("click", () => selectLanguage(code));
+  return b;
+}
+function fillLanguageList() {
+  const list = $("languageList"), term = normalize($("languageSearch").value.trim());
+  const selected = languageSide === "A" ? chosenA : chosenB;
+  list.replaceChildren();
+  const matches = l => !term || normalize(l.name + " " + l.native_name + " " + l.code).includes(term);
+  if (languageSide === "B" && !term) list.append(languageOption("auto", "Rozpoznať jazyk", "Prvú vetu druhej osoby potvrdíš", selected === "auto"));
+  const recent = store.get("recent", "").split(",").map(c => languages.find(l => l.code === c)).filter(Boolean);
   if (!term && recent.length) {
-    const group = document.createElement("optgroup"); group.label = "Naposledy použité";
-    for (const code of recent) { const l = languages.find(v => v.code === code); if (l) addOption(group, code, l.name); }
-    if (group.childElementCount) select.append(group);
+    list.append(el("p", "list-label", "Naposledy použité"));
+    for (const l of recent) list.append(languageOption(l.code, capitalize(l.name), l.native_name !== l.name ? l.native_name : "", l.code === selected));
+    list.append(el("p", "list-label", "Všetky jazyky"));
   }
-  const group = document.createElement("optgroup"); group.label = "Všetky jazyky";
-  for (const l of languages) if (matches(l) || l.code === selected) addOption(group, l.code, l.name + (l.native_name && l.native_name !== l.name ? " · " + l.native_name : "") + (l.tts === false ? " · iba text" : ""));
-  select.append(group); select.value = selected;
+  let count = 0;
+  for (const l of languages) if (matches(l)) {
+    count++;
+    list.append(languageOption(l.code, capitalize(l.name), [l.native_name !== l.name ? l.native_name : "", l.tts === false ? "iba text" : ""].filter(Boolean).join(" · "), l.code === selected));
+  }
+  if (!count) list.append(el("p", "empty-list", "Žiadny jazyk nezodpovedá hľadaniu."));
+}
+function openLanguages(side) {
+  if (running || stopping) return;
+  languageSide = side; $("languageTitle").textContent = side === "A" ? "Môj jazyk" : "Jazyk druhej osoby";
+  $("languageSearch").value = ""; fillLanguageList(); openSheet("languageSheet");
+}
+function selectLanguage(code) {
+  if (languageSide === "A") { if (code === chosenB) chosenB = chosenA; chosenA = code; }
+  else { if (code === chosenA) chosenA = chosenB === "auto" ? chosenA : chosenB; chosenB = code; }
+  if (chosenA === chosenB) chosenB = "auto";
+  saveSettings(); $("languageSheet").close(); renderAll(); controls();
+  const note = languages.find(l => l.code === code)?.script_note;
+  if (note) toast(note);
 }
 
-function fillVoiceFilters() {
-  for (const side of ["A", "B"]) for (const [field, key] of [["accent", "accent"], ["age", "age"], ["style", "style"]]) {
-    const select = $(field + side), selected = select.value;
-    select.replaceChildren(); addOption(select, "", "Všetky");
-    const values = [...new Set(voices.flatMap(v => Array.isArray(v[key]) ? v[key] : v[key] ? [v[key]] : []))].sort();
-    for (const value of values) addOption(select, value, value.replaceAll("_", " "));
-    if (values.includes(selected)) select.value = selected;
+/* ---------- sheets: voices ---------- */
+function voiceLanguage(side) { return side === "A" || chosenB === "auto" ? chosenA : chosenB; }
+function fillVoiceList() {
+  const list = $("voiceList"), selected = voiceSide === "A" ? voiceA : voiceB;
+  const term = $("voiceSearch").value.toLocaleLowerCase("sk").trim();
+  for (const chip of $("voiceGender").children) chip.setAttribute("aria-checked", String(chip.dataset.value === voiceGender));
+  const matches = voices.filter(v => (!voiceGender || v.gender === voiceGender) && (!term || [v.name, v.description, v.accent, v.age, ...(v.style || []), ...(v.use_case || [])].join(" ").toLocaleLowerCase("sk").includes(term)));
+  matches.sort((a, b) => (b.kind === "custom") - (a.kind === "custom") || (b.id === selected) - (a.id === selected));
+  list.replaceChildren();
+  for (const v of matches.slice(0, 120)) {
+    const row = el("div", "option"); row.setAttribute("role", "option"); row.setAttribute("aria-selected", String(v.id === selected)); row.tabIndex = 0;
+    const main = el("span", "option-main");
+    main.append(el("span", "option-title", v.name + (v.kind === "custom" ? " · môj hlas" : "")));
+    const sub = [v.gender === "female" ? "ženský" : v.gender === "male" ? "mužský" : "", v.accent, ...(v.style || [])].filter(Boolean).map(s => String(s).replaceAll("_", " ")).join(" · ");
+    if (sub) main.append(el("span", "option-sub", sub));
+    const play = el("button", "icon-btn"); play.type = "button"; play.setAttribute("aria-label", "Vypočuť " + v.name); play.append(icon("i-play"));
+    play.addEventListener("click", event => { event.stopPropagation(); fetchVoice("/api/preview-voice", { language: voiceLanguage(voiceSide), voice: v.id }).catch(e => error(e.message)); });
+    const check = icon("i-check"); check.classList.add("check");
+    row.append(main, check, play);
+    const choose = () => selectVoice(v.id);
+    row.addEventListener("click", choose);
+    row.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); choose(); } });
+    list.append(row);
   }
+  if (!matches.length) list.append(el("p", "empty-list", "Žiadny hlas nezodpovedá filtru."));
 }
-function fillVoices(side) {
-  const selected = side === "A" ? currentVoiceA : currentVoiceB, select = $("voice" + side);
-  const gender = $("gender" + side).value, accent = $("accent" + side).value, age = $("age" + side).value, style = $("style" + side).value;
-  const query = $("voiceSearch" + side).value.toLocaleLowerCase("sk").trim();
-  const matches = voices.filter(v => (!gender || v.gender === gender) && (!accent || v.accent === accent) && (!age || v.age === age) && (!style || v.style?.includes(style)) && (!query || [v.name,v.description,v.accent,...(v.style || []),...(v.use_case || [])].join(" ").toLocaleLowerCase("sk").includes(query)));
-  select.replaceChildren();
-  const active = voices.find(v => v.id === selected);
-  if (active && !matches.includes(active)) addOption(select, active.id, active.name + " · aktuálny výber");
-  for (const v of matches) addOption(select, v.id, v.name + (v.kind === "custom" ? " · môj hlas" : v.gender === "female" ? " · ženský" : v.gender === "male" ? " · mužský" : ""));
-  $("voiceMatch" + side).textContent = matches.length + " " + (matches.length === 1 ? "hlas zodpovedá" : matches.length < 5 ? "hlasy zodpovedajú" : "hlasov zodpovedá") + " filtrom.";
-  if ([...select.options].some(o => o.value === selected)) select.value = selected;
-  if (side === "A") currentVoiceA = select.value; else currentVoiceB = select.value;
+function openVoices(side) {
+  voiceSide = side; $("voiceTitle").textContent = side === "A" ? "Hlas pre môj jazyk" : "Hlas pre druhú osobu";
+  $("voiceSearch").value = ""; fillVoiceList(); openSheet("voiceSheet");
+}
+function selectVoice(id) {
+  if (voiceSide === "A") voiceA = id; else voiceB = id;
+  $("voiceSheet").close(); settingsChanged();
 }
 function voiceInfo(data) {
-  $("voiceCount").textContent = data.count + " " + (data.count === 1 ? "dostupný hlas" : data.count < 5 ? "dostupné hlasy" : "dostupných hlasov") + " pre " + data.model + ".";
   $("customVoiceStatus").textContent = data.custom_voice?.message || "";
   $("customVoiceStatus").hidden = !data.custom_voice;
   $("accessPanel").hidden = !data.custom_voice;
 }
+function ensureVoices() {
+  if (!voices.some(v => v.id === voiceA)) voiceA = voices[0]?.id || "Adrian";
+  if (!voices.some(v => v.id === voiceB)) voiceB = voices[0]?.id || "Adrian";
+}
+
 async function loadAccessUsers() {
   const owner = user, data = await api("/api/admin/users");
   if (owner !== user) return;
   const list = $("accessUsers"); list.replaceChildren();
   for (const row of data.users) {
-    const div = document.createElement("div"); div.className = "access-row";
-    const label = document.createElement("span"); label.textContent = row.username + (row.owner ? " · vlastník" : row.revoked ? " · zrušený" : " · aktívny");
-    div.append(label);
+    const div = el("div", "access-row");
+    div.append(el("span", "", row.username + (row.owner ? " · vlastník" : row.revoked ? " · zrušený" : "")));
     if (!row.owner && !row.revoked) {
-      const button = document.createElement("button"); button.className = "danger"; button.textContent = "Zrušiť prístup";
+      const button = el("button", "btn btn-danger", "Zrušiť prístup"); button.type = "button";
       button.addEventListener("click", async () => {
         if (!confirm("Zrušiť prístup používateľa " + row.username + " vrátane aktívnych relácií?")) return;
         try { await api("/api/admin/users/" + encodeURIComponent(row.username) + "/revoke", { method: "POST", body: "{}" }); await loadAccessUsers(); toast("Prístup bol zrušený."); }
@@ -129,51 +203,51 @@ async function loadAccessUsers() {
   }
 }
 
+/* ---------- session ---------- */
 async function showApp(session) {
   user = session.username; $("loginShell").hidden = true; $("appShell").hidden = false; $("accessCode").value = "";
   const owner = user;
   const [languageData, voiceData] = await Promise.all([api("/api/languages"), api("/api/voices")]);
   if (user !== owner) return;
-  languages = languageData.languages.sort((a,b) => a.name.localeCompare(b.name, "sk")); voices = voiceData.voices; ttsModel = voiceData.model;
-  chosenA = settings.get("langA", "sk"); chosenB = settings.get("langB", "de");
+  languages = languageData.languages.sort((a, b) => a.name.localeCompare(b.name, "sk")); voices = voiceData.voices; ttsModel = voiceData.model;
+  chosenA = store.get("langA", "sk"); chosenB = store.get("langB", "de");
   if (!languages.some(l => l.code === chosenA)) chosenA = "sk";
   if (chosenB !== "auto" && !languages.some(l => l.code === chosenB)) chosenB = "de";
-  currentVoiceA = settings.get("voiceA", settings.get("voice", "Adrian")); currentVoiceB = settings.get("voiceB", settings.get("voice", "Adrian"));
-  $("textOnly").checked = settings.get("ttsEnabled", "true") === "false";
-  $("outputMode").value = "speaker";
-  $("profileId").value = settings.get("profileId", "conversation");
-  $("conversationMode").value = settings.get("conversationMode", "auto");
-  fillLanguages($("langA"), chosenA); fillLanguages($("langB"), chosenB, "", true);
-  fillVoiceFilters(); fillVoices("A"); fillVoices("B"); voiceInfo(voiceData);
+  voiceA = store.get("voiceA", "Adrian"); voiceB = store.get("voiceB", "Adrian"); ensureVoices();
+  prefs.conversationMode = store.get("conversationMode", "auto") === "ptt" ? "ptt" : "auto";
+  // Headphones keep the microphone open during playback, so the safe speaker mode is restored on every start.
+  prefs.outputMode = store.get("outputMode", store.get("ttsEnabled", "true") === "false" ? "text" : "speaker") === "text" ? "text" : "speaker";
+  prefs.ttsSpeed = ["0.9", "1", "1.15"].includes(store.get("ttsSpeed", "1")) ? store.get("ttsSpeed", "1") : "1";
+  prefs.profileId = store.get("profileId", "conversation");
+  if (![...$("profileId").options].some(o => o.value === prefs.profileId)) prefs.profileId = "conversation";
+  voiceInfo(voiceData);
   if (voiceData.custom_voice) void loadAccessUsers().catch(e => error(e.message));
-  $("catalogNote").textContent = languageData.stale || voiceData.stale ? "Katalóg sa teraz nedá obnoviť. Používa sa posledný dostupný zoznam." : languages.length + " jazykov · hlas aj text";
-  showUsage(session.usage); controls();
+  $("catalogNote").textContent = languageData.stale || voiceData.stale ? "Katalóg sa teraz nedá obnoviť, používa sa posledný dostupný." : languages.length + " jazykov · " + voices.length + " hlasov · " + ttsModel;
+  showUsage(session.usage); renderAll(); controls();
 }
-
 function showUsage(usage) {
   if (!usage) return;
-  $("usageInfo").textContent = "Prihlásený: " + user + " · Dnes rezervované: " + Math.ceil((usage.sttSeconds || 0) / 60) + " min rozpoznávania, " + (usage.ttsRequests || 0) + " hlasových požiadaviek. Denné limity sa obnovujú o polnoci UTC.";
+  $("usageInfo").textContent = "Prihlásený ako " + user + ". Dnes: " + Math.ceil((usage.sttSeconds || 0) / 60) + " min rozpoznávania, " + (usage.ttsRequests || 0) + " hlasových požiadaviek. Limity sa obnovujú o polnoci UTC.";
 }
-
 async function signOut(callServer = true) {
-  epoch++; stopLocal(); disconnect(); clearEntries();
-  for (const d of document.querySelectorAll("dialog[open]")) d.close();
+  epoch++; resumePending = false; stopLocal(); disconnect(); clearEntries(); closeSheets();
   if (callServer) { try { await api("/api/logout", { method: "POST", body: "{}" }); } catch { $("loginStatus").textContent = "Odhlásenie na serveri sa nepotvrdilo. Po obnovení internetu sa prihlás a odhlás znova."; } }
   $("historyList").replaceChildren(); $("usageInfo").textContent = ""; $("accessUsers").replaceChildren();
   user = null; $("loginShell").hidden = false; $("appShell").hidden = true; $("accessCode").value = "";
 }
 
+/* ---------- audio playback ---------- */
 function ensurePlaybackContext() {
   if (!playbackContext || playbackContext.state === "closed") playbackContext = new AudioContext();
   return playbackContext;
 }
-
-async function unlockAudio() { await ensurePlaybackContext().resume(); }
-
+async function unlockAudio(timeout = 0) {
+  const resume = ensurePlaybackContext().resume();
+  // Without a user gesture some browsers never settle resume(); reconnects must not hang on it.
+  if (timeout) await Promise.race([resume, new Promise(r => setTimeout(r, timeout))]); else await resume;
+}
 function cacheKey(item, voice) { return [item.id, item.target_language, item.translated_text.trim(), voice, ttsModel].join("|"); }
-
-function concat(chunks) { const out = new Uint8Array(chunks.reduce((n,b) => n + b.byteLength, 0)); let i = 0; for (const b of chunks) { out.set(new Uint8Array(b), i); i += b.byteLength; } return out.buffer; }
-
+function concat(chunks) { const out = new Uint8Array(chunks.reduce((n, b) => n + b.byteLength, 0)); let i = 0; for (const b of chunks) { out.set(new Uint8Array(b), i); i += b.byteLength; } return out.buffer; }
 function rememberAudio(meta, chunks) {
   const item = entries.find(i => i.id === conversationId + "/" + meta.utterance_id);
   if (!item || !item.is_final || item.translated_text.trim() !== meta.text?.trim()) return;
@@ -181,27 +255,23 @@ function rememberAudio(meta, chunks) {
   if (buffer.byteLength > MAX_CACHE) return;
   if (audioCache.has(key)) audioCacheBytes -= audioCache.get(key).byteLength;
   audioCache.set(key, buffer); audioCacheBytes += buffer.byteLength;
-  while (audioCacheBytes > MAX_CACHE) { const key = audioCache.keys().next().value; audioCacheBytes -= audioCache.get(key).byteLength; audioCache.delete(key); }
+  while (audioCacheBytes > MAX_CACHE) { const oldest = audioCache.keys().next().value; audioCacheBytes -= audioCache.get(oldest).byteLength; audioCache.delete(oldest); }
 }
-
 function stopSources(op) {
   if (!op) return; op.cancelled = true;
   for (const source of op.sources) { source.onended = null; try { source.stop(); } catch {} }
   op.sources.clear(); clearTimeout(op.timer); op.resolve?.();
 }
-
 function stopLocal() {
   previewAbort?.abort(); previewAbort = null;
   const op = localPlayback; localPlayback = null; stopSources(op);
   if (op?.id) send({ type: "local_playback_end", playback_id: op.id });
 }
-
 function stopSound() {
   stopLocal(); stopSources(playback); playback = null;
   cancelRequest = socket?.readyState === WebSocket.OPEN ? crypto.randomUUID() : "";
   send({ type: "stop_audio", request_id: cancelRequest }); controls();
 }
-
 function startStream(meta) {
   if (cancelRequest) return;
   if (playback && playback.meta.playback_id !== meta.playback_id) stopSources(playback);
@@ -209,23 +279,21 @@ function startStream(meta) {
   playback = { meta, chunks: [], sources: new Set(), nextTime: 0, ended: false, bytes: 0, createdAt: Date.now() };
   controls();
 }
-
 function schedule(buffer, op, complete) {
   if (!op || op.cancelled || !buffer.byteLength) return;
   op.bytes = (op.bytes || 0) + buffer.byteLength;
   if (op.bytes > 8 * 1024 * 1024 || buffer.byteLength % 2) { error("Hlas bol prerušený pre neplatné alebo príliš veľké audio."); stopSound(); return; }
   const context = ensurePlaybackContext();
-  if (context.state !== "running") { error("Zvuk je pozastavený. Klikni na Zastaviť hlas a potom preklad zopakuj."); stopSound(); return; }
+  if (context.state !== "running") { error("Zvuk je pozastavený. Ťukni na mikrofón a pokračuj."); stopSound(); return; }
   const pcm = new Int16Array(buffer), audio = context.createBuffer(1, pcm.length, 24000);
-  const channel = audio.getChannelData(0); for (let i=0; i<pcm.length; i++) channel[i] = pcm[i] / 32768;
+  const channel = audio.getChannelData(0); for (let i = 0; i < pcm.length; i++) channel[i] = pcm[i] / 32768;
   const source = context.createBufferSource(); source.buffer = audio; source.connect(context.destination);
-  const at = Math.max(context.currentTime + .025, op.nextTime || 0); op.nextTime = at + audio.duration;
+  const at = Math.max(context.currentTime + 0.025, op.nextTime || 0); op.nextTime = at + audio.duration;
   op.sources.add(source);
   source.onended = () => { op.sources.delete(source); complete(); };
   source.start(at);
   if (op.meta && !op.started) { op.started = true; op.timer = setTimeout(() => { if (!op.cancelled) send({ type: "playback_started", playback_id: op.meta.playback_id }); }, Math.max(0, (at - context.currentTime) * 1000)); }
 }
-
 function completeStream() {
   const op = playback;
   if (!op || !op.ended || op.sources.size) return;
@@ -234,25 +302,22 @@ function completeStream() {
   send({ type: "playback_done", playback_id: op.meta.playback_id, status: op.interrupted ? "interrupted" : "played" });
   controls();
 }
-
 function streamAudio(buffer) {
   if (!playback) return;
   const op = playback; op.chunks.push(buffer.slice(0));
   schedule(buffer, op, completeStream);
 }
-
 function localAudio(buffer, id = crypto.randomUUID(), resolve) {
-  const op = { id, sources: new Set(), nextTime: 0, bytes: 0, resolve }; localPlayback = op; muted = $("outputMode").value === "speaker" && running; controls();
+  const op = { id, sources: new Set(), nextTime: 0, bytes: 0, resolve }; localPlayback = op; muted = outputMode() === "speaker" && running; controls();
   schedule(buffer, op, () => {
     if (op.sources.size || localPlayback !== op) return;
     localPlayback = null; send({ type: "local_playback_end", playback_id: id }); muted = false; controls(); resolve?.();
   });
 }
-
 async function replay(item) {
   if (playback || localPlayback || previewAbort) { toast("Najprv zastav aktuálny hlas."); return; }
   await unlockAudio();
-  const voice = item.target_language === chosenA ? currentVoiceA : currentVoiceB;
+  const voice = item.target_language === chosenA ? voiceA : voiceB;
   const cached = audioCache.get(cacheKey(item, voice));
   if (cached) {
     if (running) {
@@ -265,11 +330,10 @@ async function replay(item) {
   }
   if (running && item.conversation === conversationId) send({ type: "replay_translation", item_id: item.server_id });
   else {
-    if (running) { toast("Pre uložený rozhovor najprv zastav počúvanie."); return; }
+    if (running) { toast("Uložený rozhovor prehráš po zastavení počúvania."); return; }
     await fetchVoice("/api/replay", { text: item.translated_text, language: item.target_language, voice });
   }
 }
-
 function replayChunks(text) {
   let remaining = String(text || "").trim(); const chunks = [];
   while (remaining.length > 900) {
@@ -281,9 +345,8 @@ function replayChunks(text) {
   if (remaining) chunks.push(remaining);
   return chunks;
 }
-
 async function fetchVoice(url, payload) {
-  if (running || previewAbort || localPlayback) { toast("Najprv zastav počúvanie alebo hlas."); return; }
+  if (running || previewAbort || localPlayback) { toast(running ? "Ukážku si vypočuješ po zastavení rozhovoru." : "Najprv zastav aktuálny hlas."); return; }
   const abort = new AbortController(); previewAbort = abort; controls();
   try {
     await unlockAudio();
@@ -300,138 +363,134 @@ async function fetchVoice(url, payload) {
   finally { if (previewAbort === abort) previewAbort = null; controls(); }
 }
 
+/* ---------- conversation rendering ---------- */
+function isMine(item) { return item.source_language === chosenA; }
 function createTurn(item) {
-  const el = document.createElement("article"); el.className = "turn";
-  const head = document.createElement("div"); head.className = "turn-header";
-  const direction = document.createElement("span"), state = document.createElement("span"); head.append(direction, state);
-  const source = document.createElement("p"); source.className = "source-text"; source.dir = "auto";
-  const translation = document.createElement("p"); translation.className = "translated-text"; translation.dir = "auto";
-  const footer = document.createElement("div"); footer.className = "turn-footer";
-  const audio = document.createElement("span"); audio.className = "audio-state";
-  const button = document.createElement("button"); button.className = "text-button"; button.textContent = "Zopakovať hlas";
+  const article = el("article", "turn");
+  const src = el("p", "turn-src"); src.dir = "auto";
+  const tr = el("p", "turn-tr"); tr.dir = "auto";
+  const meta = el("div", "turn-meta");
+  const dir = el("span", "dir"), audio = el("span", "audio");
+  const button = el("button", "icon-btn"); button.type = "button"; button.setAttribute("aria-label", "Prehrať preklad znova"); button.append(icon("i-play"));
   button.addEventListener("click", () => { const latest = entries.find(i => i.id === item.id); if (latest) replay(latest).catch(e => error(e.message)); });
-  footer.append(audio, button); el.append(head, source, translation, footer);
-  return { el, direction, state, source, translation, audio, button, hash: "" };
+  meta.append(dir, audio, button); article.append(src, tr, meta);
+  return { article, src, tr, dir, audio, button };
 }
-
-function render() {
-  const feed = $("conversationFeed"), pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
-  if (!entries.length) { feed.replaceChildren(); nodes.clear(); const p = document.createElement("p"); p.className = "empty"; p.textContent = "Stačí stlačiť Počúvať. Tu sa objaví pôvodná reč aj preklad."; feed.append(p); }
-  else {
-    feed.querySelector(".empty")?.remove();
-    for (const item of entries) {
-      let node = nodes.get(item.id); if (!node) { node = createTurn(item); nodes.set(item.id, node); feed.append(node.el); }
-      const hash = JSON.stringify(item) + navigator.onLine;
-      if (hash === node.hash) continue; node.hash = hash;
-      node.el.classList.toggle("is-live", !item.is_final); node.el.classList.toggle("from-other", item.source_language !== chosenA);
-      node.direction.textContent = name(item.source_language) + " → " + name(item.target_language);
-      node.state.textContent = item.is_final ? "Dokončené" : "Neúplné / priebežné";
-      node.source.textContent = item.source_text; node.source.lang = item.source_language || "und";
-      node.translation.textContent = item.translated_text; node.translation.lang = item.target_language || "und";
-      node.audio.textContent = ({ pending: "Čaká na dokončenie", queued: "Hlas vo fronte", played: "Prehrané", interrupted: "Hlas prerušený", not_spoken: "Neprehrané", text_only: "Iba text" })[item.audio_status] || "";
-      node.button.disabled = !item.is_final || !item.translated_text.trim() || !navigator.onLine;
-    }
-  }
-  if (pinned) feed.scrollTop = feed.scrollHeight;
+function renderItem(item) {
+  let node = nodes.get(item.id);
+  if (!node) { node = createTurn(item); nodes.set(item.id, node); $("feed").append(node.article); }
+  node.article.classList.toggle("me", isMine(item)); node.article.classList.toggle("other", !isMine(item));
+  node.article.classList.toggle("live", !item.is_final);
+  node.src.textContent = item.source_text; node.src.lang = item.source_language || "und";
+  node.tr.textContent = item.translated_text; node.tr.lang = item.target_language || "und";
+  node.dir.textContent = shortCode(item.source_language || "?") + " → " + shortCode(item.target_language || "?");
+  node.audio.textContent = item.is_final ? AUDIO_LABELS[item.audio_status] || "" : "";
+  node.button.hidden = !item.is_final || !item.translated_text.trim() || !ttsEnabled();
+  node.button.disabled = !navigator.onLine;
+}
+function renderFace() {
   const last = entries.at(-1);
-  $("faceMyLabel").textContent = name(chosenA); $("faceOtherLabel").textContent = name(chosenB);
-  $("faceMy").textContent = last ? (last.source_language === chosenA ? last.source_text : last.translated_text) : "";
-  $("faceOther").textContent = last ? (last.source_language === chosenA ? last.translated_text : last.source_text) : "";
+  $("faceMyLabel").textContent = capitalize(name(chosenA)); $("faceOtherLabel").textContent = capitalize(name(chosenB));
+  $("faceMy").textContent = last ? (isMine(last) ? last.source_text : last.translated_text) : "";
+  $("faceOther").textContent = last ? (isMine(last) ? last.translated_text : last.source_text) : "";
   $("faceMy").lang = chosenA; $("faceOther").lang = chosenB === "auto" ? "und" : chosenB;
 }
+function render(changed) {
+  const feed = $("feed"), pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 120;
+  $("emptyState").hidden = entries.length > 0;
+  for (const item of changed) renderItem(item);
+  renderFace();
+  if (pinned) feed.scrollTop = feed.scrollHeight;
+}
+function renderAll() {
+  for (const node of nodes.values()) node.article.remove();
+  nodes.clear(); render(entries);
+}
 
+/* ---------- server messages ---------- */
 function receive(msg) {
   if (msg.type === "session_open") { cancelRequest = ""; conversationId = msg.conversation_id; return; }
   if (msg.conversation_id !== conversationId) return;
-  if (msg.type === "server_ready") { ready = true; clearTimeout(connectTimer); controls(); }
+  if (msg.type === "server_ready") { ready = true; reconnectAttempts = 0; clearTimeout(connectTimer); controls(); }
   if (msg.type === "state") {
     ready = Boolean(msg.accept_audio); muted = Boolean(msg.microphone_muted);
-    stopping = msg.state === "finishing";
-    const labels = { listening: "Počúvam", connecting: "Pripájam", translating: "Prekladám", speaking: "Hovorím", finishing: "Dokončujem posledný preklad", confirm_language: "Potvrď rozpoznaný jazyk" };
-    status(labels[msg.state] || "Pripravený", msg.state === "listening");
+    stopping = msg.state === "finishing"; serverState = msg.state;
     if (stopping) void stopCapture(false);
     controls();
   }
   if (msg.type === "token") {
+    if (msg.reset) { entries = entries.filter(e => e.conversation !== conversationId); renderAll(); }
+    const changed = [];
     for (const item of msg.conversation_items || []) {
       const id = conversationId + "/" + item.id, existing = entries.find(e => e.id === id);
       const value = { ...item, id, server_id: item.id, conversation: conversationId };
-      if (existing) Object.assign(existing, value); else entries.push(value);
+      if (existing) { Object.assign(existing, value); changed.push(existing); } else { entries.push(value); changed.push(value); }
     }
-    dirty = true; render();
+    if (changed.length) { dirty = true; render(changed); controls(); }
   }
   if (msg.type === "language_candidate") {
-    ready = false; fillLanguages($("detectedLanguage"), msg.language);
-    $("confirmLanguage").hidden = false; controls();
+    ready = false;
+    const select = $("detectedLanguage"); select.replaceChildren();
+    for (const l of languages) { const o = el("option", "", capitalize(l.name)); o.value = l.code; select.append(o); }
+    select.value = msg.language; $("confirmLanguage").hidden = false; haptic(); controls();
   }
   if (msg.type === "language_confirmed") {
     chosenB = msg.language; $("confirmLanguage").hidden = true;
-    fillLanguages($("langB"), chosenB, "", true); saveSettings(); render();
+    saveSettings(); renderAll(); controls();
   }
   if (msg.type === "tts_stream_start") startStream(msg);
   if (msg.type === "tts_stream_end" && playback?.meta.playback_id === msg.playback_id) {
     if (msg.cancelled) { stopSources(playback); playback = null; }
     else { playback.meta.text = msg.text || playback.meta.text; playback.ended = true; playback.interrupted = msg.interrupted; completeStream(); }
+    controls();
   }
   if (msg.type === "local_playback_ready" && localPlayback?.id === msg.playback_id && localPlayback.waiting) {
     const op = localPlayback; clearTimeout(op.timer); localPlayback = null; localAudio(op.buffer, op.id);
   }
   if (msg.type === "audio_cancelled") { if (cancelRequest && msg.request_id !== cancelRequest) return; cancelRequest = ""; stopSources(playback); playback = null; stopLocal(); muted = false; controls(); }
-  if (msg.type === "error") { error(msg.message); if (msg.fatal) { disconnect(); if (msg.code === "auth_expired") void signOut(false); } }
-  if (msg.type === "session_finished") { disconnect(); status("Rozhovor pozastavený"); void api("/api/usage").then(showUsage).catch(() => {}); }
+  if (msg.type === "error") {
+    if (msg.fatal && RECONNECTABLE.has(msg.code)) { connectionLost(); return; }
+    error(msg.message);
+    if (msg.fatal) { disconnect(); if (msg.code === "auth_expired") void signOut(false); }
+  }
+  if (msg.type === "session_finished") { disconnect(); void api("/api/usage").then(showUsage).catch(() => {}); }
 }
 
+/* ---------- microphone ---------- */
 function sendPcm(buffer, flush = false) {
   if (!running || (!ready && !flush) || muted || (stopping && !flush) || socket?.readyState !== WebSocket.OPEN) return;
-  if ($("conversationMode").value === "ptt" && !pttPressed) return;
-  if ($("conversationMode").value === "auto" && $("outputMode").value === "headphones" && playback?.started && Date.now() - playback.createdAt > 300) {
+  if (prefs.conversationMode === "ptt" && !pttPressed) return;
+  // With headphones, loud new speech interrupts the translation that is playing.
+  if (prefs.conversationMode === "auto" && outputMode() === "headphones" && playback?.started && Date.now() - playback.createdAt > 300) {
     const pcm = new Int16Array(buffer); let energy = 0;
     for (let i = 0; i < pcm.length; i += 4) energy += pcm[i] * pcm[i];
     const rms = Math.sqrt(energy / Math.max(1, Math.ceil(pcm.length / 4)));
     vadHits = rms > 1200 ? vadHits + 1 : 0;
     if (vadHits >= 4) { vadHits = 0; stopSound(); }
   } else vadHits = 0;
-  if (socket.bufferedAmount + buffer.byteLength > 128 * 1024) { error("Slabé spojenie. Časť reči sa nemusela preniesť. Obnov počúvanie."); disconnect(); return; }
+  if (socket.bufferedAmount + buffer.byteLength > 128 * 1024) { connectionLost(); return; }
   socket.send(buffer);
 }
-
 async function startCapture(currentEpoch) {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
   if (epoch !== currentEpoch) { stream.getTracks().forEach(t => t.stop()); return; }
   media = stream;
-  try { captureContext = new AudioContext({ sampleRate: 16000 }); } catch { captureContext = new AudioContext(); }
+  // The device rate is kept; the worklet resamples to 16 kHz, so no browser has to convert between contexts.
+  captureContext = new AudioContext();
   await captureContext.resume();
   if (epoch !== currentEpoch) return;
+  if (!captureContext.audioWorklet) throw Object.assign(new Error("AudioWorklet unavailable"), { name: "NotSupportedError" });
   const source = captureContext.createMediaStreamSource(stream);
   const gain = captureContext.createGain(); gain.gain.value = 0; gain.connect(captureContext.destination);
-  try {
-    await captureContext.audioWorklet.addModule("/audio-capture-worklet.js");
-    if (epoch !== currentEpoch) return;
-    worklet = new AudioWorkletNode(captureContext, "pcm-capture-processor", { processorOptions: { targetSampleRate: 16000, chunkSize: 1024 } });
-    worklet.port.onmessage = event => {
-      if (event.data.type === "audio") sendPcm(event.data.buffer, event.data.flush);
-      if (event.data.type === "flushed") { flushResolve?.(); flushResolve = null; }
-    };
-    source.connect(worklet); worklet.connect(gain);
-  } catch {
-    if (epoch !== currentEpoch) return;
-    processor = captureContext.createScriptProcessor(4096, 1, 1);
-    let sum = 0, weight = 0; const ratio = captureContext.sampleRate / 16000;
-    processor.onaudioprocess = event => {
-      event.outputBuffer.getChannelData(0).fill(0); const input = event.inputBuffer.getChannelData(0), samples = [];
-      for (const sample of input) {
-        let remaining = 1;
-        while (remaining > 1e-8) {
-          const take = Math.min(remaining, ratio - weight); sum += sample * take; weight += take; remaining -= take;
-          if (weight >= ratio - 1e-8) { const v = Math.max(-1, Math.min(1, sum / ratio)); samples.push(v < 0 ? v * 32768 : v * 32767); sum = 0; weight = 0; }
-        }
-      }
-      sendPcm(new Int16Array(samples).buffer);
-    };
-    source.connect(processor); processor.connect(gain);
-  }
+  await captureContext.audioWorklet.addModule("/audio-capture-worklet.js");
+  if (epoch !== currentEpoch) return;
+  worklet = new AudioWorkletNode(captureContext, "pcm-capture-processor", { processorOptions: { targetSampleRate: 16000, chunkSize: 1024 } });
+  worklet.port.onmessage = event => {
+    if (event.data.type === "audio") sendPcm(event.data.buffer, event.data.flush);
+    if (event.data.type === "flushed") { flushResolve?.(); flushResolve = null; }
+  };
+  source.connect(worklet); worklet.connect(gain);
 }
-
 async function stopCapture(flush) {
   if (flush && worklet) {
     await new Promise(resolve => {
@@ -440,134 +499,140 @@ async function stopCapture(flush) {
     });
   }
   if (worklet) { worklet.port.onmessage = null; worklet.disconnect(); worklet = null; }
-  if (processor) { processor.onaudioprocess = null; processor.disconnect(); processor = null; }
   media?.getTracks().forEach(t => t.stop()); media = null;
   const context = captureContext; captureContext = null; if (context && context.state !== "closed") await context.close();
 }
-
 async function lockScreen() {
   if (!navigator.wakeLock || document.visibilityState !== "visible") return;
   try { const lock = await navigator.wakeLock.request("screen"); wakeLock = lock; lock.addEventListener("release", () => { if (wakeLock === lock) wakeLock = null; }); } catch {}
 }
 
-async function start() {
+/* ---------- conversation lifecycle ---------- */
+async function start(automatic = false) {
   if (running || !user || !navigator.onLine) return;
   if (chosenA === chosenB) { error("Vyber dva rôzne jazyky."); return; }
   if (entries.length >= 1000) { error("Ulož rozhovor a začni nový."); return; }
-  error(""); saveSettings(); stopLocal();
-  running = true; stopping = false; ready = false; muted = false;
-  const token = ++epoch; status("Povoľ mikrofón"); controls();
+  if (!automatic) { error(""); haptic(); }
+  saveSettings(); stopLocal();
+  clearTimeout(reconnectTimer); reconnectTimer = null; resumePending = false;
+  running = true; stopping = false; ready = false; muted = false; serverState = "idle";
+  const token = ++epoch; controls();
   try {
-    await unlockAudio(); if (epoch !== token) return;
+    await unlockAudio(automatic ? 400 : 0); if (epoch !== token) return;
     await startCapture(token); if (epoch !== token || !running) return;
     await lockScreen(); if (epoch !== token) return;
     const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host); socket = ws; ws.binaryType = "arraybuffer";
-    status("Pripájam"); connectTimer = setTimeout(() => { if (socket === ws && !ready) { error("Pripojenie sa nepodarilo. Obnov počúvanie."); disconnect(); } }, 12000);
+    connectTimer = setTimeout(() => { if (socket === ws && !ready) connectionLost(); }, 12000);
     ws.onopen = () => {
       if (socket !== ws) { ws.close(); return; }
-      send({ type: "config", language_a: chosenA, language_b: chosenB, voice_a: currentVoiceA, voice_b: currentVoiceB, output_mode: $("outputMode").value, tts_enabled: !textOnly(), profile_id: $("profileId").value, conversation_mode: $("conversationMode").value });
+      send({ type: "config", language_a: chosenA, language_b: chosenB, voice_a: voiceA, voice_b: voiceB, output_mode: outputMode(), tts_enabled: ttsEnabled(), tts_speed: prefs.ttsSpeed, profile_id: prefs.profileId, conversation_mode: prefs.conversationMode });
     };
     ws.onmessage = event => {
       if (socket !== ws) return;
       try { typeof event.data === "string" ? receive(JSON.parse(event.data)) : streamAudio(event.data); }
       catch { error("Neplatná odpoveď servera."); disconnect(); }
     };
-    ws.onerror = () => { if (socket === ws) error("Spojenie zlyhalo. Skontroluj internet alebo prihlásenie."); };
-    ws.onclose = event => { if (socket === ws) { disconnect(); if (event.code !== 1000) error("Spojenie sa prerušilo. Prepis zostal zachovaný; obnov počúvanie."); } };
-  } catch (err) { if (epoch === token) { disconnect(); error(err.name === "NotAllowedError" ? "Povoľ mikrofón v nastavení tejto stránky." : "Mikrofón alebo zvuk nie je dostupný."); } }
+    ws.onclose = event => { if (socket === ws) { if (event.code === 1000) disconnect(); else connectionLost(); } };
+  } catch (err) {
+    if (epoch !== token) return;
+    disconnect();
+    error(err.name === "NotAllowedError" ? "Povoľ mikrofón v nastaveniach prehliadača pre túto stránku." : err.name === "NotSupportedError" ? "Tento prehliadač nepodporuje nahrávanie zvuku. Použi aktuálny Chrome alebo Safari." : "Mikrofón alebo zvuk nie je dostupný.");
+  }
 }
-
+// Unexpected drop: keep the transcript and retry a few times while the page is visible and online.
+function connectionLost() {
+  const wasRunning = running && !stopping;
+  disconnect();
+  if (!wasRunning || !user) return;
+  if (!navigator.onLine || document.visibilityState !== "visible" || reconnectAttempts >= 3) {
+    resumePending = true; error(navigator.onLine ? "Spojenie sa prerušilo. Prepis zostal zachovaný." : ""); controls(); return;
+  }
+  const delay = 1500 * 2 ** reconnectAttempts++;
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; void start(true).catch(e => error(e.message)); }, delay);
+  controls();
+}
 async function pause() {
   if (stopping) return;
+  haptic();
   if (!socket || socket.readyState !== WebSocket.OPEN) { disconnect(); return; }
   stopping = true; controls(); await stopCapture(true);
-  send({ type: "client_stop" }); status("Dokončujem posledný preklad");
+  send({ type: "client_stop" });
   finishTimer = setTimeout(() => { error("Dokončenie trvalo príliš dlho."); disconnect(); }, 125000);
 }
-
 function disconnect() {
-  epoch++; cancelRequest = ""; clearTimeout(connectTimer); clearTimeout(finishTimer);
+  epoch++; cancelRequest = ""; clearTimeout(connectTimer); clearTimeout(finishTimer); clearTimeout(reconnectTimer); reconnectTimer = null;
   const ws = socket; socket = null;
   if (ws) { ws.onclose = null; ws.onerror = null; ws.onmessage = null; try { ws.close(); } catch {} }
-  for (const item of entries) if (["queued", "pending"].includes(item.audio_status)) item.audio_status = "not_spoken";
-  running = false; stopping = false; ready = false; muted = false; pttPressed = false; pttSide = ""; pttEnding = false; vadHits = 0;
-  render(); void stopCapture(false); stopSources(playback); playback = null; stopLocal();
+  const changed = [];
+  for (const item of entries) if (["queued", "pending"].includes(item.audio_status)) { item.audio_status = "not_spoken"; changed.push(item); }
+  running = false; stopping = false; ready = false; muted = false; serverState = "idle"; pttPressed = false; pttSide = ""; pttEnding = false; vadHits = 0;
+  for (const side of ["A", "B"]) $("ptt" + side).classList.remove("pressed");
+  render(changed); void stopCapture(false); stopSources(playback); playback = null; stopLocal();
   if (wakeLock) { void wakeLock.release(); wakeLock = null; }
-  $("confirmLanguage").hidden = true; status("Pripravený"); controls();
+  $("confirmLanguage").hidden = true; controls();
 }
-
 function clearEntries() {
-  entries = []; nodes.clear(); audioCache.clear(); audioCacheBytes = 0; dirty = false;
-  render(); $("conversationLabel").textContent = "Aktuálny rozhovor";
+  entries = []; audioCache.clear(); audioCacheBytes = 0; dirty = false; resumePending = false;
+  renderAll(); controls();
 }
-
 function asText(items = entries) { return items.map(i => name(i.source_language) + " → " + name(i.target_language) + (i.is_final ? "" : " [neúplné]") + "\n" + i.source_text + "\n" + i.translated_text).join("\n\n"); }
 
+/* ---------- history ---------- */
 async function showHistory() {
   const owner = user; if (!owner) return;
   const rows = await LocalHistory.list(owner);
   if (owner !== user) return;
   const list = $("historyList"); list.replaceChildren();
-  if (!rows.length) { const p = document.createElement("p"); p.textContent = "Zatiaľ nemáš uložený rozhovor."; list.append(p); }
+  if (!rows.length) list.append(el("p", "empty-list", "Zatiaľ nemáš uložený rozhovor."));
   for (const row of rows) {
-    const el = document.createElement("article"); el.className = "history-row";
-    const title = document.createElement("h3"); title.textContent = new Date(row.created_at).toLocaleString("sk") + " · " + name(row.languages.a) + " ↔ " + name(row.languages.b);
-    const actions = document.createElement("div"); actions.className = "history-actions";
-    for (const [label, fn] of [
-      ["Otvoriť", () => {
-        if (dirty && !confirm("Zahodiť neuložený aktuálny rozhovor?")) return;
-        disconnect(); clearEntries(); entries = row.items; chosenA = row.languages.a; chosenB = row.languages.b;
-        fillLanguages($("langA"), chosenA); fillLanguages($("langB"), chosenB, "", true);
-        $("conversationLabel").textContent = "Uložený rozhovor"; render(); controls(); $("historyDialog").close();
-      }],
-      ["Exportovať", () => {
-        const url = URL.createObjectURL(new Blob([asText(row.items)], { type: "text/plain;charset=utf-8" }));
-        const a = document.createElement("a"); a.href = url; a.download = "rozhovor-" + row.created_at.slice(0,10) + ".txt"; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }],
-      ["Vymazať", async () => { if (confirm("Vymazať tento uložený rozhovor?")) { await LocalHistory.remove(user, row.id); await showHistory(); } }],
-    ]) { const b = document.createElement("button"); b.textContent = label; b.className = "secondary"; b.addEventListener("click", () => { if (owner === user) Promise.resolve(fn()).catch(e => error(e.message)); }); actions.append(b); }
-    el.append(title, actions); list.append(el);
+    const item = el("div", "history-row");
+    const main = el("span", "option-main"); main.tabIndex = 0; main.setAttribute("role", "button");
+    main.append(el("span", "option-title", capitalize(name(row.languages.a)) + " ↔ " + capitalize(name(row.languages.b))));
+    main.append(el("span", "option-sub", new Date(row.created_at).toLocaleString("sk", { dateStyle: "medium", timeStyle: "short" }) + " · " + row.items.length + " viet"));
+    const open = () => {
+      if (dirty && !confirm("Zahodiť neuložený aktuálny rozhovor?")) return;
+      disconnect(); entries = row.items; chosenA = row.languages.a; chosenB = row.languages.b; dirty = false; resumePending = false;
+      closeSheets(); renderAll(); controls();
+    };
+    main.addEventListener("click", open);
+    main.addEventListener("keydown", event => { if (event.key === "Enter") open(); });
+    const exportBtn = el("button", "icon-btn"); exportBtn.type = "button"; exportBtn.setAttribute("aria-label", "Exportovať ako text"); exportBtn.append(icon("i-download"));
+    exportBtn.addEventListener("click", () => {
+      const url = URL.createObjectURL(new Blob([asText(row.items)], { type: "text/plain;charset=utf-8" }));
+      const a = document.createElement("a"); a.href = url; a.download = "rozhovor-" + row.created_at.slice(0, 10) + ".txt"; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+    const deleteBtn = el("button", "icon-btn"); deleteBtn.type = "button"; deleteBtn.setAttribute("aria-label", "Vymazať rozhovor"); deleteBtn.append(icon("i-trash"));
+    deleteBtn.addEventListener("click", async () => {
+      if (!confirm("Vymazať tento uložený rozhovor?")) return;
+      try { await LocalHistory.remove(owner, row.id); await showHistory(); } catch (e) { error(e.message); }
+    });
+    item.append(main, exportBtn, deleteBtn); list.append(item);
   }
-  if (!$("historyDialog").open) $("historyDialog").showModal();
+  $("moreSheet").close(); openSheet("historySheet");
 }
 
+/* ---------- settings ---------- */
 function settingsChanged() {
-  saveSettings(); controls();
-  send({ type: "update_settings", voice_a: currentVoiceA, voice_b: currentVoiceB, output_mode: $("outputMode").value, tts_enabled: !textOnly() });
-  if (textOnly()) stopSound();
+  saveSettings(); controls(); renderAll();
+  send({ type: "update_settings", voice_a: voiceA, voice_b: voiceB, output_mode: outputMode(), tts_enabled: ttsEnabled(), tts_speed: prefs.ttsSpeed });
+  if (!ttsEnabled()) stopSound();
 }
-$("loginForm").addEventListener("submit", async event => {
-  event.preventDefault(); $("loginStatus").textContent = "Prihlasujem…";
-  const button = event.currentTarget.querySelector("button"); button.disabled = true;
-  try { await showApp(await api("/api/login", { method: "POST", body: JSON.stringify({ code: $("accessCode").value.trim() }) })); $("loginStatus").textContent = ""; }
-  catch (err) { $("loginStatus").textContent = err.message; }
-  finally { button.disabled = false; }
-});
-$("startBtn").addEventListener("click", () => (running ? pause() : start()).catch(e => error(e.message)));
-$("stopAudioBtn").addEventListener("click", stopSound);
-$("settingsBtn").addEventListener("click", () => $("settingsDialog").showModal());
-for (const b of document.querySelectorAll(".close-dialog")) b.addEventListener("click", () => b.closest("dialog").close());
-$("logoutBtn").addEventListener("click", () => void signOut());
-$("confirmLanguageBtn").addEventListener("click", () => send({ type: "confirm_language", language: $("detectedLanguage").value }));
-$("textOnly").addEventListener("change", settingsChanged);
-$("outputMode").addEventListener("change", settingsChanged);
-$("faceMode").addEventListener("change", () => { $("facePanel").hidden = !$("faceMode").checked; render(); });
-for (const side of ["A", "B"]) {
-  $("search" + side).addEventListener("input", event => fillLanguages($("lang" + side), side === "A" ? chosenA : chosenB, event.target.value, side === "B"));
-  $("lang" + side).addEventListener("change", event => {
-    if (side === "A") chosenA = event.target.value; else chosenB = event.target.value;
-    saveSettings(); render();
-    const note = languages.find(l => l.code === event.target.value)?.script_note;
-    if (note) toast(note);
+for (const group of document.querySelectorAll(".segmented")) {
+  group.addEventListener("click", event => {
+    const button = event.target.closest("button[data-value]"); if (!button || button.disabled) return;
+    const key = group.dataset.setting;
+    if (prefs[key] === button.dataset.value) return;
+    prefs[key] = button.dataset.value;
+    if (key === "outputMode" && prefs.outputMode === "headphones") toast("Slúchadlá vyber iba vtedy, keď cez ne naozaj počúvaš.");
+    settingsChanged();
   });
-  for (const field of ["gender", "accent", "age", "style", "voiceSearch"]) $(field + side).addEventListener(field === "voiceSearch" ? "input" : "change", () => fillVoices(side));
-  $("voice" + side).addEventListener("change", event => { if (side === "A") currentVoiceA = event.target.value; else currentVoiceB = event.target.value; settingsChanged(); });
-  $("preview" + side).addEventListener("click", () => fetchVoice("/api/preview-voice", { language: side === "A" || chosenB === "auto" ? chosenA : chosenB, voice: side === "A" ? currentVoiceA : currentVoiceB }).catch(e => error(e.message)));
 }
+
+/* ---------- push to talk ---------- */
 function beginPtt(side) {
-  if (!running || !ready || stopping || pttPressed || pttEnding || $("conversationMode").value !== "ptt") return;
+  if (!running || !ready || stopping || pttPressed || pttEnding || prefs.conversationMode !== "ptt") return;
   if (playback || localPlayback) stopSound();
-  pttPressed = true; pttSide = side;
+  pttPressed = true; pttSide = side; haptic();
   $("ptt" + side).classList.add("pressed");
   send({ type: "ptt_start" }); controls();
 }
@@ -588,36 +653,66 @@ for (const side of ["A", "B"]) {
   const button = $("ptt" + side);
   button.addEventListener("pointerdown", event => { event.preventDefault(); button.setPointerCapture(event.pointerId); beginPtt(side); });
   for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) button.addEventListener(type, () => { void finishPtt(side); });
-  button.addEventListener("keydown", event => {
-    if (!event.repeat && [" ", "Enter"].includes(event.key)) { event.preventDefault(); beginPtt(side); }
-  });
-  button.addEventListener("keyup", event => {
-    if ([" ", "Enter"].includes(event.key)) { event.preventDefault(); void finishPtt(side); }
-  });
+  button.addEventListener("contextmenu", event => event.preventDefault());
+  button.addEventListener("keydown", event => { if (!event.repeat && [" ", "Enter"].includes(event.key)) { event.preventDefault(); beginPtt(side); } });
+  button.addEventListener("keyup", event => { if ([" ", "Enter"].includes(event.key)) { event.preventDefault(); void finishPtt(side); } });
 }
-$("profileId").addEventListener("change", saveSettings);
-$("conversationMode").addEventListener("change", () => { saveSettings(); controls(); });
-$("swapBtn").addEventListener("click", () => { if (running || chosenB === "auto") return; [chosenA, chosenB] = [chosenB, chosenA]; fillLanguages($("langA"), chosenA); fillLanguages($("langB"), chosenB, "", true); saveSettings(); render(); });
-$("newBtn").addEventListener("click", () => { if (dirty && !confirm("Zahodiť neuložený rozhovor?")) return; disconnect(); clearEntries(); error(""); controls(); });
-$("copyBtn").addEventListener("click", () => { if (entries.length) navigator.clipboard.writeText(asText()).then(() => toast("Rozhovor skopírovaný.")).catch(() => error("Kopírovanie nie je dostupné.")); });
+
+/* ---------- wiring ---------- */
+$("loginForm").addEventListener("submit", async event => {
+  event.preventDefault(); $("loginStatus").textContent = "";
+  const button = event.currentTarget.querySelector("button"); button.disabled = true;
+  try { await showApp(await api("/api/login", { method: "POST", body: JSON.stringify({ code: $("accessCode").value.trim() }) })); }
+  catch (err) { $("loginStatus").textContent = err.message; }
+  finally { button.disabled = false; }
+});
+$("startBtn").addEventListener("click", () => (running ? pause() : start()).catch(e => error(e.message)));
+$("resumeBtn").addEventListener("click", () => start().catch(e => error(e.message)));
+$("pttEndBtn").addEventListener("click", () => pause().catch(e => error(e.message)));
+$("stopAudioBtn").addEventListener("click", stopSound);
+$("faceBtn").addEventListener("click", () => { faceMode = !faceMode; renderFace(); controls(); });
+$("errorClose").addEventListener("click", () => error(""));
+$("langABtn").addEventListener("click", () => openLanguages("A"));
+$("langBBtn").addEventListener("click", () => openLanguages("B"));
+$("languageSearch").addEventListener("input", fillLanguageList);
+$("swapBtn").addEventListener("click", () => { if (running || chosenB === "auto") return; [chosenA, chosenB] = [chosenB, chosenA]; [voiceA, voiceB] = [voiceB, voiceA]; saveSettings(); renderAll(); controls(); });
+$("settingsBtn").addEventListener("click", () => { controls(); $("moreSheet").close(); openSheet("settingsSheet"); });
+$("moreBtn").addEventListener("click", () => openSheet("moreSheet"));
+$("voiceABtn").addEventListener("click", () => openVoices("A"));
+$("voiceBBtn").addEventListener("click", () => openVoices("B"));
+$("voiceSearch").addEventListener("input", fillVoiceList);
+$("voiceGender").addEventListener("click", event => { const chip = event.target.closest("[data-value]"); if (!chip) return; voiceGender = chip.dataset.value; fillVoiceList(); });
+$("profileId").addEventListener("change", event => { prefs.profileId = event.target.value; saveSettings(); });
+$("logoutBtn").addEventListener("click", () => void signOut());
+$("confirmLanguageBtn").addEventListener("click", () => send({ type: "confirm_language", language: $("detectedLanguage").value }));
+for (const d of document.querySelectorAll("dialog")) {
+  d.addEventListener("click", event => { if (event.target === d) d.close(); });
+  d.querySelector(".close-sheet")?.addEventListener("click", () => d.close());
+}
+$("newBtn").addEventListener("click", () => { if (dirty && !confirm("Zahodiť neuložený rozhovor?")) return; disconnect(); clearEntries(); error(""); closeSheets(); });
+$("copyBtn").addEventListener("click", () => {
+  if (!entries.length) { toast("Rozhovor je prázdny."); return; }
+  navigator.clipboard.writeText(asText()).then(() => { toast("Rozhovor skopírovaný."); closeSheets(); }).catch(() => error("Kopírovanie nie je dostupné."));
+});
 $("saveBtn").addEventListener("click", async () => {
   if (!entries.length) { toast("Rozhovor je prázdny."); return; }
   const snapshot = JSON.stringify(entries), owner = user;
-  try { await LocalHistory.save(owner, entries, { a: chosenA, b: chosenB }); if (user === owner && snapshot === JSON.stringify(entries)) dirty = false; toast("Text uložený v tomto zariadení."); }
+  try { await LocalHistory.save(owner, entries, { a: chosenA, b: chosenB }); if (user === owner && snapshot === JSON.stringify(entries)) dirty = false; toast("Uložené v tomto zariadení."); closeSheets(); }
   catch (err) { error(err.message); }
 });
 $("historyBtn").addEventListener("click", () => showHistory().catch(e => error(e.message)));
 
 function connectivity() {
   $("offlineBanner").hidden = navigator.onLine;
-  if (!navigator.onLine && running) { error("Internet sa prerušil. Obnov počúvanie po pripojení."); disconnect(); }
-  controls(); render();
+  if (!navigator.onLine && running) connectionLost();
+  else if (navigator.onLine && resumePending && !running && document.visibilityState === "visible" && reconnectAttempts < 3) { reconnectAttempts++; void start(true).catch(() => {}); }
+  controls();
 }
 window.addEventListener("online", connectivity); window.addEventListener("offline", connectivity);
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden" && running) {
-    send({ type: "client_stop" }); disconnect(); error("Po návrate do aplikácie obnov počúvanie. Prehliadač môže na pozadí pozastaviť mikrofón.");
-  } else if (running && !wakeLock) void lockScreen();
+  // Mobile browsers suspend the microphone in the background: finish cleanly and offer one-tap resume.
+  if (document.visibilityState === "hidden" && running) { send({ type: "client_stop" }); disconnect(); resumePending = true; controls(); }
+  else if (document.visibilityState === "visible" && running && !wakeLock) void lockScreen();
 });
 window.addEventListener("pagehide", () => { send({ type: "client_stop" }); disconnect(); });
 window.addEventListener("beforeunload", event => { if (dirty) { event.preventDefault(); event.returnValue = ""; } });
@@ -627,10 +722,10 @@ setInterval(async () => {
   try {
     const [languageData, voiceData] = await Promise.all([api("/api/languages"), api("/api/voices")]);
     if (owner !== user) return;
-    languages = languageData.languages.sort((a,b) => a.name.localeCompare(b.name,"sk"));
-    voices = voiceData.voices; ttsModel = voiceData.model; voiceInfo(voiceData); fillVoiceFilters();
-    $("catalogNote").textContent = languageData.stale || voiceData.stale ? "Používa sa posledný dostupný katalóg." : languages.length + " dostupných jazykov";
-    if (!running) { fillLanguages($("langA"), chosenA); fillLanguages($("langB"), chosenB, "", true); fillVoices("A"); fillVoices("B"); }
+    languages = languageData.languages.sort((a, b) => a.name.localeCompare(b.name, "sk"));
+    voices = voiceData.voices; ttsModel = voiceData.model; voiceInfo(voiceData);
+    if (!running) ensureVoices();
+    controls();
   } catch {}
 }, 600000);
 api("/api/session").then(showApp).catch(() => { $("loginShell").hidden = false; $("appShell").hidden = true; });
