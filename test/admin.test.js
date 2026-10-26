@@ -239,3 +239,25 @@ test("deleting a blocked account leaves no legacy revocation for a future accoun
   assert.equal((await f.request(root + "/family/delete", {}, admin)).status, 200);
   assert.equal(store.db.prepare("SELECT 1 FROM revoked_users WHERE user='family'").get(), undefined);
 });
+test("a recreated account never sees the deleted account's last conversation summary", async t => {
+  const f = await setup(t), admin = await f.login(), family = await f.login("family", FAMILY);
+  const ws = await f.connect(family); await until(() => ws.messages.some(m => m.type === "server_ready"));
+  assert.equal((await f.request(root + "/family/delete", {}, admin)).status, 200);
+  await until(() => ws.readyState === WebSocket.CLOSED);
+  const row = f.runtime.store.db.prepare("SELECT username FROM conversation_log").get();
+  assert.match(row.username, /^deleted-[0-9a-f]{8}$/, "the final log row is anonymized with the history");
+  assert.equal((await f.request(root, { username: "family", role: "user", password: PASSWORD }, admin)).status, 201);
+  const fresh = await f.login("family", PASSWORD);
+  assert.equal((await (await f.request("/api/diagnostics", undefined, fresh)).json()).last_session_summary, null);
+});
+test("a failed audit leaves the live conversation and logins untouched", async t => {
+  const f = await setup(t), admin = await f.login(), family = await f.login("family", FAMILY), store = f.runtime.store;
+  const ws = await f.connect(family); await until(() => ws.messages.some(m => m.type === "server_ready"));
+  const audit = store.audit; store.audit = () => { throw new Error("disk full"); };
+  assert.notEqual((await f.request(root + "/family/disable", {}, admin)).status, 200);
+  store.audit = audit;
+  assert.equal(ws.readyState, WebSocket.OPEN);
+  assert.equal((await f.request("/api/session", undefined, family)).status, 200);
+  assert.equal(store.getUser("family").disabled_at, null);
+  ws.close();
+});

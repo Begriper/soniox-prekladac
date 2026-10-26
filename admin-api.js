@@ -19,12 +19,17 @@ function installAdminApi(app, { store, session, route, endUser, conversations, o
     if (!user) res.status(404).json({ error: "Používateľ neexistuje." });
     return user;
   };
-  function mutation(req, action, username, detail, fn) {
+  // The account change and its audit row commit together; live conversations are ended only after
+  // the commit (`after`), so a failed audit never closes a conversation or loses its log row.
+  function mutation(req, action, username, detail, fn, after) {
     store.db.exec("BEGIN IMMEDIATE");
+    let result;
     try {
-      const result = fn(); store.audit(req.auth.username, action, username, detail);
-      store.db.exec("COMMIT"); return result;
+      result = fn(); store.audit(req.auth.username, action, username, detail);
+      store.db.exec("COMMIT");
     } catch (err) { store.db.exec("ROLLBACK"); throw err; }
+    after?.();
+    return result;
   }
   app.get("/api/admin/users", (_req, res) => res.json({ users: store.listUsers().map(u => ({
     username: u.username, role: u.role, disabled: Boolean(u.disabled_at), created_at: u.created_at, last_login_at: u.last_login_at, note: u.note,
@@ -51,7 +56,7 @@ function installAdminApi(app, { store, session, route, endUser, conversations, o
     const pw = req.body.password ?? generatePassword(), hash = await hashPassword(pw);
     req.auth = session(req); if (req.auth?.role !== "admin") return denied(res);
     if (store.getUser(user.username)?.created_at !== user.created_at) return invalid(res);
-    mutation(req, "reset_password", user.username, null, () => { store.setPasswordHash(user.username, hash); endUser(user.username); });
+    mutation(req, "reset_password", user.username, null, () => { store.setPasswordHash(user.username, hash); store.deleteUserSessions(user.username); }, () => endUser(user.username));
     res.json({ ok: true, username: user.username, password: pw });
   }));
   app.post("/api/admin/users/:username/limits", (req, res) => {
@@ -72,11 +77,13 @@ function installAdminApi(app, { store, session, route, endUser, conversations, o
     const user = target(req, res); if (!user) return;
     const disable = action === "disable" || action === "revoke", remove = action === "delete";
     if ((disable || remove) && (user.username === req.auth.username || (user.role === "admin" && !user.disabled_at && store.countAdmins() <= 1))) return invalid(res);
+    // A deleted user's live conversation ends first so its final log row is anonymized with the history.
+    if (remove) endUser(user.username);
     mutation(req, (disable ? "disable" : action) + "_user", user.username, null, () => {
-      if (disable || remove || action === "logout") endUser(user.username);
+      if (disable || action === "logout") store.deleteUserSessions(user.username);
       if (disable || action === "enable") store.setDisabled(user.username, disable);
       if (remove) store.deleteUser(user.username);
-    });
+    }, () => endUser(user.username, { forget: remove }));
     res.json({ ok: true, username: user.username });
   });
   function integer(value, fallback, max) {

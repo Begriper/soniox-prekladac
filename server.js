@@ -139,11 +139,13 @@ function createApplication(env = process.env) {
     for (const p of previews.values()) if (p.sessionId === id) p.abort.abort();
     recentSessions.delete(id);
   }
-  function endUser(username) {
-    store.deleteUserSessions(username);
+  // Ends live conversations and previews only; callers remove the stored logins in their own transaction.
+  function endUser(username, { forget = false } = {}) {
     for (const c of conversations.values()) if (c.auth.username === username) destroy(c.auth.id);
     const preview = previews.get(username); if (preview) destroy(preview.sessionId);
     for (const id of recentSessions.keys()) if (!store.getSession(sessionHash(id))) recentSessions.delete(id);
+    // A deleted account's last summary must not reach a future account of the same name.
+    if (forget) summaries.delete(username);
   }
   function session(req) {
     const value = parseCookies(req.headers.cookie)[COOKIE];
