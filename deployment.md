@@ -1,3 +1,21 @@
+# Verzia 3.4.0 — release 52, 2026-10-26
+
+Na výslovné schválenie používateľa zlúčený PR #13 a nasadený `main` (merge commit `341a745`): prihlásenie odtlačkom prsta, tvárou alebo Face ID (passkey, WebAuthn) a podpis „Vytvoril František Stolár“ na úvodnej obrazovke. Fly remote builder, iba existujúca Machine `8e2135b77993d8` vo `fra`; volume `vol_rnzld90dqg7mypkr` zostal pripojený, secrets sa nemenili.
+
+- Snapshot volume pred deployom: `vs_e79ozPQoYjkhXKZ4q0YzG5K` (24 MiB, retencia 5 dní).
+- Aktuálny image: `registry.fly.io/soniox-prekladac:deployment-01M5WQ68XXD5YNZV46K0DZX12V`
+- Predchádzajúci image na rollback: `registry.fly.io/soniox-prekladac:deployment-01M5WKA9EE4MDCG033WYESH1QV` (v51)
+- Pred deployom: CI (Node 24) zelené, lokálne `npm run check` a 147/147 testov (Node 22.14), Codex adversarial review opravený.
+- Po deployi: release v52, health check `1 passing`; `/api/config` 3.4.0; cache `translator-shell-3.4.0`; HTML má podpis autora a tlačidlo passkey; `?v=3.4.0` súbory 200; `/api/passkeys` bez cookie 401; `/api/passkeys/login/options` 200 s `rpId` `soniox-prekladac.fly.dev`, cudzí Origin 403; neplatné prihlásenie passkey 400; `/api/session` 401, `/api/admin/users` 403.
+- Neoverené: skutočný odtlačok alebo Face ID na telefónoch (iPhone appka z plochy, Android). Overí používateľ.
+- Rollback na v51 je bezpečný: tabuľka `passkeys` a stĺpec `webauthn_user_id` stará verzia ignoruje; prihlásenie heslom funguje ďalej.
+
+```powershell
+fly deploy --app soniox-prekladac --image registry.fly.io/soniox-prekladac:deployment-01M5WKA9EE4MDCG033WYESH1QV --only-machines 8e2135b77993d8 --update-only --strategy immediate --yes
+```
+
+---
+
 # Verzia 3.3.0 — release 51, 2026-10-26
 
 Na výslovné schválenie používateľa zlúčené PR #5–#12 a nasadený `main` (merge commit `b11262e`): opravy v3.2.1 (obnova spojenia, PTT a začiatok reči, strážca mikrofónu, fronta hlasu so spätným tlakom, rozpočet TTS streamov, verzované PWA assety) a admin v3.3.0 (účty v SQLite, meno + heslo, prihlásenie na 30 dní, limity na osobu, admin API, rozbor spotreby, admin obrazovky). Fly remote builder, iba existujúca Machine `8e2135b77993d8` vo `fra`; volume `vol_rnzld90dqg7mypkr` zostal pripojený, secrets sa nemenili.
