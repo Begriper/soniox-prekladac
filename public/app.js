@@ -179,7 +179,6 @@ function selectVoice(id) {
 function voiceInfo(data) {
   $("customVoiceStatus").textContent = data.custom_voice?.message || "";
   $("customVoiceStatus").hidden = !data.custom_voice;
-  $("accessPanel").hidden = !data.custom_voice;
 }
 function ensureVoices() {
   if (!voices.some(v => v.id === voiceA)) voiceA = voices[0]?.id || "Adrian";
@@ -193,7 +192,7 @@ async function loadAccessUsers() {
   for (const row of data.users) {
     const div = el("div", "access-row");
     div.append(el("span", "", row.username + (row.owner ? " · vlastník" : row.revoked ? " · zrušený" : "")));
-    if (!row.owner && !row.revoked) {
+    if (row.username !== user && !row.revoked) {
       const button = el("button", "btn btn-danger", "Zrušiť prístup"); button.type = "button";
       button.addEventListener("click", async () => {
         if (!confirm("Zrušiť prístup používateľa " + row.username + " vrátane aktívnych relácií?")) return;
@@ -209,6 +208,7 @@ async function loadAccessUsers() {
 /* ---------- session ---------- */
 async function showApp(session) {
   user = session.username; $("loginShell").hidden = true; $("appShell").hidden = false; $("accessCode").value = "";
+  $("accessPanel").hidden = session.role !== "admin";
   const owner = user;
   const [languageData, voiceData] = await Promise.all([api("/api/languages"), api("/api/voices")]);
   if (user !== owner) return;
@@ -224,7 +224,7 @@ async function showApp(session) {
   prefs.profileId = store.get("profileId", "conversation");
   if (![...$("profileId").options].some(o => o.value === prefs.profileId)) prefs.profileId = "conversation";
   voiceInfo(voiceData);
-  if (voiceData.custom_voice) void loadAccessUsers().catch(e => error(e.message));
+  if (session.role === "admin") void loadAccessUsers().catch(e => error(e.message));
   $("catalogNote").textContent = languageData.stale || voiceData.stale ? "Katalóg sa teraz nedá obnoviť, používa sa posledný dostupný." : languages.length + " jazykov · " + voices.length + " hlasov · " + ttsModel;
   showUsage(session.usage); renderAll(); controls();
 }
@@ -712,7 +712,8 @@ for (const side of ["A", "B"]) {
 $("loginForm").addEventListener("submit", async event => {
   event.preventDefault(); $("loginStatus").textContent = "";
   const button = event.currentTarget.querySelector("button"); button.disabled = true;
-  try { await showApp(await api("/api/login", { method: "POST", body: JSON.stringify({ code: $("accessCode").value.trim() }) })); }
+  const username = $("username").value.trim(), password = $("accessCode").value;
+  try { await showApp(await api("/api/login", { method: "POST", body: JSON.stringify(username ? { username, password } : { code: password.trim() }) })); }
   catch (err) { $("loginStatus").textContent = err.message; }
   finally { button.disabled = false; }
 });

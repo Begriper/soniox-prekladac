@@ -27,13 +27,13 @@ test("bounded chunks do not split surrogate pairs or lose unspaced text", () => 
   assert.equal(chunks.join(""),text);
   assert.ok(chunks.every(c=>c.length<=900 && c.isWellFormed()));
 });
-function localSession(t) {
+function localSession(t, expiresAt = Date.now() + 3600000) {
   const client=new EventEmitter(); client.readyState=1;client.bufferedAmount=0;
   client.messages=[];client.send=m=>client.messages.push(JSON.parse(m)); client.ping=()=>{};
   client.terminate=()=>{client.readyState=3;};client.close=()=>{client.readyState=3;};
   const reservations=[];
   const session=new SpeechSession(client,{
-    auth:{id:"test",username:"owner",expiresAt:Date.now()+3600000},ip:"127.0.0.1",
+    auth:{id:"test",username:"owner",expiresAt},ip:"127.0.0.1",
     store:{reserve:(_u,patch)=>{reservations.push(patch);return true;}},
     catalog:{hasLanguage:()=>true,hasVoice:()=>true,canSpeak:()=>true},
     urls:{ttsWs:"ws://127.0.0.1:1"},limits:{sessionMs:3600000,idleMs:3600000,sessionTtsRequests:120},
@@ -59,6 +59,14 @@ test("session expiry closes live operation even without another HTTP request", t
   assert.equal(session.closed,true);
   assert.equal(client.readyState,3);
   assert.ok(client.messages.some(m=>m.code==="auth_expired"));
+});
+test("30-day logins do not overflow the live conversation expiry timer", t => {
+  t.mock.timers.enable({apis:["setTimeout"]});
+  const {session,client}=localSession(t,Date.now()+30*86400000);
+  clearTimeout(session.configTimer); session.configured=true;
+  t.mock.timers.tick(1000);
+  assert.equal(session.closed,false);
+  assert.equal(client.messages.some(m=>m.code==="auth_expired"),false);
 });
 test("queue overload preserves previous jobs and marks the new text unspoken", t => {
   const {session,client}=localSession(t);
