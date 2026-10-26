@@ -26,6 +26,7 @@ class SpeechSession {
     this.acceptAudio = false; this.finishing = false; this.sttFinished = false;
     this.lastActivity = Date.now(); this.startedAt = Date.now(); this.candidate = null;
     this.sessionAudio = 0; this.sessionTtsBytes = 0; this.sessionTtsRequests = 0;
+    this.sessionTtsChars = 0; this.sessionSttSeconds = 0; this.endCode = "client_closed";
     this.ttsFailures = 0; this.restUntil = 0; this.audioStates = new Map(); this.endpointTimes = new Map();
     this.timings = []; this.timerSet = new Set(); this.isAlive = true; this.frameCount = 0;
     this.outbox = []; this.outboxBytes = 0; this.outboxTimer = null; this.drainWaiters = []; this.echoUntil = 0;
@@ -73,7 +74,10 @@ class SpeechSession {
     this.client.send(JSON.stringify({ ...data, conversation_id: this.id }));
   }
   reserve(patch) {
-    try { if (this.store.reserve(this.auth.username, patch)) return true; }
+    try { if (this.store.reserve(this.auth.username, patch)) {
+      this.sessionTtsChars += patch.ttsChars || 0; this.sessionSttSeconds += patch.sttSeconds || 0;
+      return true;
+    } }
     catch { this.end("Účtovanie spotreby nie je dostupné.", "usage_unavailable"); return false; }
     this.end("Denný limit bol vyčerpaný.", "quota_exceeded"); return false;
   }
@@ -108,7 +112,10 @@ class SpeechSession {
       const values = this.timings.filter(t => t.transport === transport && Number.isFinite(t.endpoint_to_playback_ack_ms)).map(t => t.endpoint_to_playback_ack_ms).sort((a,b) => a-b);
       latency[transport] = { samples: values.length, median_ms: values.length ? values[Math.floor(values.length / 2)] : null, p95_ms: values.length ? values[Math.ceil(values.length * .95) - 1] : null };
     }
-    return { latency, duration_ms: Date.now() - this.startedAt, audio_bytes: this.sessionAudio, tts_requests: this.sessionTtsRequests, tts_audio_bytes: this.sessionTtsBytes, timings: this.timings.slice(-100), rest_until: this.restUntil, provider_error: this.lastProviderError || null };
+    const values = this.timings.map(t => t.endpoint_to_playback_ack_ms).filter(Number.isFinite).sort((a, b) => a - b), i = Math.floor(values.length / 2);
+    return { id: this.id, started_at: new Date(this.startedAt).toISOString(), language_a: this.languageA, language_b: this.languageB, profile: this.profileId, stt_seconds: this.sessionSttSeconds, tts_chars: this.sessionTtsChars, end_code: this.endCode,
+      latency_median_ms: values.length ? Math.round(values.length % 2 ? values[i] : (values[i - 1] + values[i]) / 2) : null,
+      latency, duration_ms: Date.now() - this.startedAt, audio_bytes: this.sessionAudio, tts_requests: this.sessionTtsRequests, tts_audio_bytes: this.sessionTtsBytes, timings: this.timings.slice(-100), rest_until: this.restUntil, provider_error: this.lastProviderError || null };
   }
   // Sends only items that changed since the last update; long conversations would otherwise
   // resend the whole transcript several times a second over mobile data.
@@ -448,7 +455,7 @@ class SpeechSession {
         if (!current()) return;
         if (!reserveAttempt([...job.text].length)) throw new Error("quota");
         begin("rest");
-        await synthesizeRest({ url: this.urls.ttsRest, apiKey: this.apiKey, ...job, signal: op.abort.signal, onChunk: chunk => {
+        await synthesizeRest({ url: this.urls.ttsRest, apiKey: this.apiKey, clientReferenceId: this.auth.username, ...job, signal: op.abort.signal, onChunk: chunk => {
           for (let i = 0; i < chunk.length; i += 16384) audio(chunk.subarray(i, i + 16384));
         } });
       }
@@ -497,11 +504,13 @@ class SpeechSession {
   }
   maybeFinish() {
     if (!this.closed && (this.finishing || this.sttFinished) && this.sttFinished && !this.playback && !this.preparingJob && !this.queue.length) {
+      this.endCode = "finished";
       this.send({ type: "session_finished", summary: this.snapshot() }); this.close(); this.client.close(1000);
     }
   }
   end(message, code = "session_error") {
     if (this.closed) return;
+    this.endCode = code;
     this.send({ type: "error", code, message, fatal: true });
     this.close(); this.client.close(4000, code);
   }

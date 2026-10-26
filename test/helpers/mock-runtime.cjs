@@ -3,11 +3,18 @@ const WebSocket = require("ws");
 const { createApplication } = require("../../server");
 const CODE = "test-only-access-123456";
 async function fixture(options = {}) {
-  const state = { rest: [], configs: [], stt: [], tts: [], authHeaders: [], restDelay: 0, mode: "ok", autoReply: options.autoReply || false };
+  const state = { rest: [], configs: [], stt: [], tts: [], authHeaders: [], restDelay: 0, mode: "ok", autoReply: options.autoReply || false, usageCalls: [], usagePages: options.usagePages || [{ usage_logs: [], next_page_cursor: null }] };
   const pcm = Buffer.alloc(4800);
   for (let i = 0; i < pcm.length / 2; i++) pcm.writeInt16LE(Math.round(1000 * Math.sin(i * .04)), i * 2);
   const provider = http.createServer(async (req, res) => {
     let body = ""; for await (const b of req) body += b;
+    if (req.url.startsWith("/usage-logs")) {
+      state.usageCalls.push({ url: req.url, authorization: req.headers.authorization });
+      if (state.usageStatus) res.statusCode = state.usageStatus;
+      const cursor = new URL(req.url, "http://localhost").searchParams.get("cursor");
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(state.usagePages[cursor ? Number(cursor) : 0])); return;
+    }
     if (req.url === "/stt-models" || req.url === "/tts-models") {
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ models: [{ id: req.url === "/stt-models" ? "stt-rt-v5" : "tts-rt-v2", languages: ["sk", "de", "es", "en", "ar", "zh"], voices: [{ id: "Adrian", gender: "male" }, { id: "Maya", gender: "female" }] }] })); return;
@@ -71,7 +78,7 @@ async function fixture(options = {}) {
     SONIOX_STT_URL: base.replace("http", "ws") + "/stt",
     SONIOX_TTS_WS_URL: base.replace("http", "ws") + "/tts",
     SONIOX_TTS_REST_URL: base + "/tts", SONIOX_STT_MODELS_URL: base + "/stt-models",
-    SONIOX_TTS_MODELS_URL: base + "/tts-models", SONIOX_SHARED_VOICES_URL: base + "/shared-voices", SONIOX_CUSTOM_VOICES_URL: base + "/voices", ...options.env
+    SONIOX_TTS_MODELS_URL: base + "/tts-models", SONIOX_SHARED_VOICES_URL: base + "/shared-voices", SONIOX_CUSTOM_VOICES_URL: base + "/voices", SONIOX_USAGE_LOGS_URL: base + "/usage-logs", ...options.env
   });
   await new Promise(r => runtime.server.listen(options.port || 0, "127.0.0.1", r));
   const url = "http://127.0.0.1:" + runtime.server.address().port;

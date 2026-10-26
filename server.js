@@ -5,6 +5,7 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const WebSocket = require("ws");
 const { UsageStore } = require("./usage-store");
+const { installAdminApi } = require("./admin-api");
 const { hashPassword, verifyPassword } = require("./passwords");
 const { Catalog } = require("./catalog");
 const { SpeechSession } = require("./speech-session");
@@ -47,12 +48,14 @@ function createApplication(env = process.env) {
     ttsModels: env.SONIOX_TTS_MODELS_URL || "https://api" + suffix + ".soniox.com/v1/tts-models",
     sharedVoices: env.SONIOX_SHARED_VOICES_URL || "https://api" + suffix + ".soniox.com/v1/shared-voices",
     customVoices: env.SONIOX_CUSTOM_VOICES_URL || "https://api" + suffix + ".soniox.com/v1/voices",
+    usageLogs: env.SONIOX_USAGE_LOGS_URL || "https://api" + suffix + ".soniox.com/v1/usage-logs",
   };
   for (const [kind, value] of Object.entries(urls)) {
     const url = new URL(value);
     if (url.username || url.password || url.search || (production && !["https:", "wss:"].includes(url.protocol))) throw new Error("Invalid endpoint: " + kind);
   }
   const port = number(env, "PORT", 3000, 1, 65535);
+  const prices = { stt: number(env, "PRICE_STT_USD_PER_HOUR", 0.12, 0), tts: number(env, "PRICE_TTS_USD_PER_HOUR", 0.70, 0) };
   const origins = new Set((env.APP_ORIGINS || (production ? "https://" + (env.FLY_APP_NAME || "soniox-prekladac") + ".fly.dev" : "http://localhost:" + port + ",http://127.0.0.1:" + port)).split(",").map(s => {
     const u = new URL(s.trim());
     if (u.origin !== s.trim() || (production && u.protocol !== "https:")) throw new Error("Invalid APP_ORIGINS");
@@ -132,9 +135,15 @@ function createApplication(env = process.env) {
   const cookie = (value, seconds) => COOKIE + "=" + value + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" + seconds + (production ? "; Secure" : "");
   function destroy(id) {
     store.deleteSession(sessionHash(id));
-    recentSessions.delete(id);
     for (const conversation of conversations.values()) if (conversation.auth.id === id) conversation.end("Prihlásenie bolo ukončené.", "auth_expired");
     for (const p of previews.values()) if (p.sessionId === id) p.abort.abort();
+    recentSessions.delete(id);
+  }
+  function endUser(username) {
+    store.deleteUserSessions(username);
+    for (const c of conversations.values()) if (c.auth.username === username) destroy(c.auth.id);
+    const preview = previews.get(username); if (preview) destroy(preview.sessionId);
+    for (const id of recentSessions.keys()) if (!store.getSession(sessionHash(id))) recentSessions.delete(id);
   }
   function session(req) {
     const value = parseCookies(req.headers.cookie)[COOKIE];
@@ -189,7 +198,9 @@ function createApplication(env = process.env) {
       if (await verifyPassword(pw, candidate?.password_hash || dummyHash)) user = candidate;
     }
     // Re-read after async scrypt: an admin may have disabled the account meanwhile.
+    const verified = user;
     user = user && store.getUser(user.username);
+    if (verified && user && (verified.password_hash !== user.password_hash || verified.created_at !== user.created_at)) return denied();
     if (!user || user.disabled_at) return denied();
     store.pruneSessions(Date.now());
     // A per-account cap instead of a global one: no account can fill the table and lock out the owner.
@@ -212,20 +223,7 @@ function createApplication(env = process.env) {
     res.json({ ...stt, voices: undefined, languages: stt.languages.map(l => ({ ...l, tts: tts.languages.some(t => t.code === l.code), script_note: { zh: "Hlas podporuje zjednodušenú čínštinu.", sr: "Hlas podporuje latinku.", bs: "Hlas podporuje latinku.", kk: "Hlas podporuje cyriliku." }[l.code] || "" })) });
   }));
   app.get("/api/voices", requireSession, route(async (req, res) => res.json(await catalog.voicesFor(req.auth.username))));
-  app.get("/api/admin/users", requireSession, (req, res) => {
-    if (req.auth.role !== "admin") return res.status(403).json({ error: "Prístup odmietnutý." });
-    res.json({ users: store.listUsers().map(u => ({ username: u.username, role: u.role, owner: u.username === ownerUsername, revoked: Boolean(u.disabled_at) })) });
-  });
-  app.post("/api/admin/users/:username/revoke", requireSession, (req, res) => {
-    if (req.auth.role !== "admin") return res.status(403).json({ error: "Prístup odmietnutý." });
-    const target = req.params.username;
-    if (target === req.auth.username || !store.getUser(target) || !store.setDisabled(target, true)) return res.status(400).json({ error: "Používateľa nemožno zrušiť." });
-    store.deleteUserSessions(target);
-    for (const c of conversations.values()) if (c.auth.username === target) destroy(c.auth.id);
-    const preview = previews.get(target); if (preview) preview.abort.abort();
-    store.audit(req.auth.username, "disable_user", target);
-    res.json({ ok: true, username: target });
-  });
+  installAdminApi(app, { store, session, route, endUser, conversations, ownerUsername, prices, usageLogsUrl: urls.usageLogs, apiKey: env.SONIOX_API_KEY });
   app.get("/api/diagnostics", requireSession, (req, res) => res.json({ version: APP_VERSION, models: { stt: STT_MODEL, tts: TTS_MODEL }, region, endpoint, transport: normalizeTtsTransport(env.TTS_TRANSPORT), active: conversations.size, usage: usage(req.auth.username), last_session_summary: summaries.get(req.auth.username) || null }));
   app.post("/api/preview-voice", requireSession, route(async (req, res) => {
     const username = req.auth.username;
@@ -247,7 +245,7 @@ function createApplication(env = process.env) {
       const phrases = { sk: "Dobrý deň. Toto je ukážka hlasu.", de: "Guten Tag. Dies ist eine Stimmprobe.", es: "Hola. Esta es una muestra de voz.", en: "Hello. This is a voice sample." };
       const text = phrases[language] || "1, 2, 3.";
       if (!store.reserve(username, { ttsRequests: 1, ttsChars: [...text].length, previewTtsRequests: 1 })) return res.status(429).json({ error: "Denný limit hlasu." });
-      const buffer = await synthesizeRest({ url: urls.ttsRest, apiKey: env.SONIOX_API_KEY, text, language, voice, signal: abort.signal });
+      const buffer = await synthesizeRest({ url: urls.ttsRest, apiKey: env.SONIOX_API_KEY, clientReferenceId: username, text, language, voice, signal: abort.signal });
       if (abort.signal.aborted || !session(req)) return;
       if (!store.reserve(username, { ttsAudioBytes: buffer.length })) return res.status(429).json({ error: "Denný limit audia." });
       res.type("application/octet-stream").send(buffer);
@@ -262,6 +260,9 @@ function createApplication(env = process.env) {
   }));
   app.post("/api/replay", requireSession, route(async (req, res) => {
     const { text, language, voice } = req.body || {};
+    const speed = req.body?.tts_speed !== undefined ? req.body.tts_speed : req.body?.speed;
+    if (req.body?.tts_speed !== undefined && req.body?.speed !== undefined && req.body.tts_speed !== req.body.speed) return res.status(400).json({ error: "Neplatná rýchlosť hlasu." });
+    if (speed !== undefined && (typeof speed !== "number" || !Number.isFinite(speed) || speed < 0.7 || speed > 1.3)) return res.status(400).json({ error: "Neplatná rýchlosť hlasu." });
     const username = req.auth.username;
     if (previews.has(username) || [...conversations.values()].some(c => c.auth.username === username)) {
       return res.status(409).json({ error: "Najprv zastav aktuálne počúvanie alebo hlas." });
@@ -283,7 +284,7 @@ function createApplication(env = process.env) {
         return res.status(400).json({ error: "Neplatný alebo príliš dlhý text hlasu." });
       }
       if (!store.reserve(username, { ttsRequests: 1, ttsChars: [...text].length })) return res.status(429).json({ error: "Denný limit hlasu." });
-      const buffer = await synthesizeRest({ url: urls.ttsRest, apiKey: env.SONIOX_API_KEY, text, language, voice, signal: abort.signal });
+      const buffer = await synthesizeRest({ url: urls.ttsRest, apiKey: env.SONIOX_API_KEY, clientReferenceId: username, text, language, voice, speed, signal: abort.signal });
       if (abort.signal.aborted || !session(req)) return;
       if (!store.reserve(username, { ttsAudioBytes: buffer.length })) return res.status(429).json({ error: "Denný limit audia." });
       res.type("application/octet-stream").send(buffer);
@@ -342,7 +343,10 @@ function createApplication(env = process.env) {
             const conversation = new SpeechSession(client, {
               auth, ip, store, catalog, apiKey: env.SONIOX_API_KEY, urls, limits: sessionLimits,
               endpoint, transport: normalizeTtsTransport(env.TTS_TRANSPORT),
-              onClose: summary => { conversations.delete(client); summaries.set(auth.username, summary); recentSessions.set(auth.id, Date.now()); },
+              onClose: summary => {
+                conversations.delete(client); summaries.set(auth.username, summary); recentSessions.set(auth.id, Date.now());
+                try { store.recordConversation(auth.username, summary); } catch { /* Logging must not prevent cleanup. */ }
+              },
             });
             conversations.set(client, conversation);
           } catch { client.terminate(); }
