@@ -653,7 +653,7 @@ async function startCapture(currentEpoch) {
   if (!captureContext.audioWorklet) throw Object.assign(new Error("AudioWorklet unavailable"), { name: "NotSupportedError" });
   const source = captureContext.createMediaStreamSource(stream);
   const gain = captureContext.createGain(); gain.gain.value = 0; gain.connect(captureContext.destination);
-  await captureContext.audioWorklet.addModule("/audio-capture-worklet.js?v=3.2.1");
+  await captureContext.audioWorklet.addModule("/audio-capture-worklet.js?v=3.3.0");
   if (epoch !== currentEpoch) return;
   worklet = new AudioWorkletNode(captureContext, "pcm-capture-processor", { processorOptions: { targetSampleRate: 16000, chunkSize: 1024 } });
   worklet.port.onmessage = event => {

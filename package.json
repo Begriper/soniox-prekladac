@@ -1,6 +1,6 @@
 {
   "name": "soniox-live-translator",
-  "version": "3.2.1",
+  "version": "3.3.0",
   "description": "Súkromný obojsmerný prekladač Soniox s trvalými kvótami a lokálnou textovou históriou",
   "main": "server.js",
   "scripts": {
