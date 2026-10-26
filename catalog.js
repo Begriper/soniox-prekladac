@@ -2,6 +2,7 @@
 const { STT_MODEL, TTS_MODEL } = require("./runtime-models");
 // Public documented baseline; live metadata for the exact model takes precedence.
 const CODES = "af sq ar az eu be bn bs bg ca zh hr cs da nl en et fi fr gl de el gu he hi hu id it ja kn kk ko lv lt mk ms ml mr no fa pl pt pa ro ru sr sk sl es sw sv tl ta te th tr uk ur vi cy".split(" ");
+const VOICE_REFRESH_MS = 480000, VOICE_VALID_MS = 600000;
 const names = new Intl.DisplayNames(["sk"], { type: "language" });
 const language = code => ({ code, name: names.of(code) || code, native_name: new Intl.DisplayNames([code], { type: "language" }).of(code) || code });
 function normalizeModel(data, id) {
@@ -59,8 +60,14 @@ class Catalog {
     }
     throw new Error("voice catalog exceeded page limit");
   }
+  // The list stays valid for 10 minutes but is refreshed after 8, so live speech rarely waits for the network.
+  voicesUsable() { return Date.now() < this.voiceUpdatedAt + VOICE_VALID_MS; }
+  async ensureVoices() {
+    const refresh = this.refreshVoices();
+    if (!this.voicesUsable()) await refresh;
+  }
   async refreshVoices() {
-    if (Date.now() < this.voiceUpdatedAt + 600000 || Date.now() < this.voiceRetryAt) return;
+    if (Date.now() < this.voiceUpdatedAt + VOICE_REFRESH_MS || Date.now() < this.voiceRetryAt) return;
     if (this.voicePending) return this.voicePending;
     this.voicePending = (async () => {
       try {

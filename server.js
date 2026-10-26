@@ -176,7 +176,7 @@ function createApplication(env = process.env) {
     res.on("close", disconnect);
     try {
       const language = req.body?.language || "sk", voice = req.body?.voice || "Adrian";
-      await catalog.refreshVoices();
+      await catalog.ensureVoices();
       if (abort.signal.aborted || !session(req)) {
         if (!res.destroyed) res.status(401).json({ error: "Najprv sa prihlás." });
         return;
@@ -211,7 +211,7 @@ function createApplication(env = process.env) {
     const disconnect = () => { if (!res.writableEnded) abort.abort(); };
     res.on("close", disconnect);
     try {
-      await catalog.refreshVoices();
+      await catalog.ensureVoices();
       if (abort.signal.aborted || !session(req)) {
         if (!res.destroyed) res.status(401).json({ error: "Najprv sa prihlás." });
         return;
@@ -246,7 +246,7 @@ function createApplication(env = process.env) {
         if (req.url !== "/" || !validOrigin(req, origins)) return reject(socket, 403);
         const auth = session(req); if (!auth) return reject(socket, 401);
         const ip = clientIp(req, env.TRUST_FLY_PROXY === "true" && Boolean(env.FLY_APP_NAME));
-        await catalog.refreshVoices();
+        await catalog.ensureVoices();
         if (socket.destroyed) return;
         if (!session(req)) return reject(socket, 401);
         if (previews.has(auth.username)) return reject(socket, 409);
