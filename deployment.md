@@ -1,3 +1,22 @@
+# Verzia 3.3.0 — release 51, 2026-10-26
+
+Na výslovné schválenie používateľa zlúčené PR #5–#12 a nasadený `main` (merge commit `b11262e`): opravy v3.2.1 (obnova spojenia, PTT a začiatok reči, strážca mikrofónu, fronta hlasu so spätným tlakom, rozpočet TTS streamov, verzované PWA assety) a admin v3.3.0 (účty v SQLite, meno + heslo, prihlásenie na 30 dní, limity na osobu, admin API, rozbor spotreby, admin obrazovky). Fly remote builder, iba existujúca Machine `8e2135b77993d8` vo `fra`; volume `vol_rnzld90dqg7mypkr` zostal pripojený, secrets sa nemenili.
+
+- Snapshot volume pred deployom: `vs_K6LKXRmKDlbUZ1VpKv93RgY` (22 MiB, retencia 5 dní).
+- Aktuálny image: `registry.fly.io/soniox-prekladac:deployment-01M5WKA9EE4MDCG033WYESH1QV`
+- Predchádzajúci image na rollback: `registry.fly.io/soniox-prekladac:deployment-01M5W97PS3G8X2KNEHZ6G7VT31` (v50)
+- Pred deployom: GitHub Actions CI (Node 24) zelené pre všetky PR, lokálne `npm run check` a 120/120 testov (Node 22.14).
+- Po deployi: release v51, Machine `started`, health check `1 passing` (jedno zlyhanie počas štartu pred `Translator 3.3.0 listening on 8080`). `/health` 200; `/api/config` 3.3.0; HTML má pole „Meno“ a admin sheet; všetky `?v=3.3.0` súbory, `sw.js` a font HTTP 200; cache `translator-shell-3.3.0`; neprihlásené `/api/session` a WebSocket 401, `/api/admin/users` 403; POST `/api/login` s cudzím Origin 403.
+- Pri prvom štarte sa `APP_ACCESS_CODES` naimportovali ako účty (kód = heslo, `APP_OWNER_USERNAME` = admin). Runtime databáza sa pri overení nečítala.
+- Neoverené: skutočné prihlásenie menom a heslom, admin obrazovky a `/api/admin/soniox-usage` proti živému Sonioxu, ozvena na reproduktore a fyzické telefóny (iPhone, Android, Bluetooth). Overí používateľ.
+- Rollback na v50 je bezpečný na rovnakom volume: stará verzia nové tabuľky ignoruje, blokovania sa zrkadlia do `revoked_users` a prihlasuje sa env kódom. Prihlásenia z v3.3.0 po rollbacku neplatia (v50 ich drží iba v pamäti).
+
+```powershell
+fly deploy --app soniox-prekladac --image registry.fly.io/soniox-prekladac:deployment-01M5W97PS3G8X2KNEHZ6G7VT31 --only-machines 8e2135b77993d8 --update-only --strategy immediate --yes
+```
+
+---
+
 # Verzia 3.2.0 — release 50, 2026-10-26
 
 Na výslovné schválenie používateľa nasadený `main` po zlúčení PR #3 (merge commit `eda0759`, obsahuje aj PR #2): Soniox autentifikácia v hlavičke, PTT keepalive, TTS lifecycle, rozdielový prepis, auto-reconnect, nové mobilné UI a HTTP health check. Fly remote builder, iba existujúca Machine `8e2135b77993d8` vo `fra`; volume `vol_rnzld90dqg7mypkr` zostal pripojený, secrets sa nemenili.
