@@ -31,7 +31,7 @@ class SpeechSession {
     this.heartbeat = setInterval(() => {
       if (!this.isAlive) { this.close(); client.terminate(); return; }
       this.isAlive = false; client.ping();
-    }, 25000);
+    }, 10000);
     this.tick = setInterval(() => this.guard(() => {
       this.frameCount = 0;
       if (this.closed) return;
@@ -77,7 +77,7 @@ class SpeechSession {
       const values = this.timings.filter(t => t.transport === transport && Number.isFinite(t.endpoint_to_playback_ack_ms)).map(t => t.endpoint_to_playback_ack_ms).sort((a,b) => a-b);
       latency[transport] = { samples: values.length, median_ms: values.length ? values[Math.floor(values.length / 2)] : null, p95_ms: values.length ? values[Math.ceil(values.length * .95) - 1] : null };
     }
-    return { latency, duration_ms: Date.now() - this.startedAt, audio_bytes: this.sessionAudio, tts_requests: this.sessionTtsRequests, tts_audio_bytes: this.sessionTtsBytes, timings: this.timings.slice(-100), rest_until: this.restUntil };
+    return { latency, duration_ms: Date.now() - this.startedAt, audio_bytes: this.sessionAudio, tts_requests: this.sessionTtsRequests, tts_audio_bytes: this.sessionTtsBytes, timings: this.timings.slice(-100), rest_until: this.restUntil, provider_error: this.lastProviderError || null };
   }
   // Sends only items that changed since the last update; long conversations would otherwise
   // resend the whole transcript several times a second over mobile data.
@@ -202,7 +202,7 @@ class SpeechSession {
       if (!current()) return;
       let result; try { result = JSON.parse(raw.toString()); } catch { this.end("Neplatná odpoveď rozpoznávania."); return; }
       if (!result || typeof result !== "object") return;
-      if (result.error_code) { this.end("Rozpoznávanie nie je dostupné.", "stt_provider_error"); return; }
+      if (result.error_code) { this.providerError(result); return; }
       this.tokens(result.tokens || []);
       if (result.finished) { this.sttFinished = true; this.acceptAudio = false; this.flushPending(); socket.close(); this.maybeFinish(); }
     }));
@@ -248,6 +248,14 @@ class SpeechSession {
       this.send({ type: "error", message: "Rozhovor je dlhý. Ulož ho a začni nový." }); this.stop();
     }
     this.updateItems(); this.state();
+  }
+  // Transient Soniox failures are retried by the client; account problems get a clear, final message.
+  providerError(result) {
+    const status = Number(result.error_code);
+    this.lastProviderError = { status: Number.isFinite(status) ? status : null, type: String(result.error_type || "").slice(0, 80), request_id: String(result.request_id || "").slice(0, 120), at: new Date().toISOString() };
+    if ([408, 429, 500, 502, 503].includes(status)) { this.end("Rozpoznávanie je dočasne nedostupné. Obnovujem…", "stt_retry"); return; }
+    if (status === 402) { this.end("Kredit Soniox je vyčerpaný.", "provider_credit"); return; }
+    this.end("Rozpoznávanie nie je dostupné.", "stt_provider_error");
   }
   prewarmFor(item, language) {
     // Only streamed headphone playback starts before <end>; speaker playback gains nothing from a prewarm.

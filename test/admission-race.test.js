@@ -127,7 +127,8 @@ test("parallel websocket upgrades cannot exceed active conversation limits", asy
   await Promise.race([second.then(() => {}), waitFor(() => gate.calls() === 2), delay(100)]);
   gate.release();
   const results = await Promise.all([first, second]);
-  assert.equal(results.filter(r => r.accepted).length, 1);
+  // The same login may take over its own conversation, but never runs two at once.
+  await waitFor(() => results.filter(r => r.accepted && r.client.readyState === WebSocket.OPEN).length === 1);
   assert.equal(f.runtime.conversations.size, 1);
   for (const result of results) result.client.terminate();
 });

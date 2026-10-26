@@ -14,6 +14,7 @@ const { normalizeTtsTransport } = require("./tts-transport");
 const { parseCookies, equal, validOrigin, clientIp, WindowLimiter } = require("./security");
 const APP_VERSION = "3.2.0";
 const COOKIE = "sl_session";
+const RESUME_WINDOW_MS = 5 * 60000;
 function number(env, key, fallback, min = 1, max = 1e12) {
   const value = Number(env[key] ?? fallback);
   if (!Number.isFinite(value) || value < min || value > max) throw new Error("Invalid configuration: " + key);
@@ -81,7 +82,7 @@ function createApplication(env = process.env) {
   const maxIp = number(env, "MAX_ACTIVE_WS_PER_IP", 2, 1, 100);
   const store = new UsageStore(env.USAGE_DB_PATH || (production ? "/data/usage.sqlite" : path.join(__dirname, ".local-data", "usage.sqlite")), limits);
   const catalog = new Catalog({ store, apiKey: env.SONIOX_API_KEY, urls: { stt: urls.sttModels, tts: urls.ttsModels, shared: urls.sharedVoices, custom: urls.customVoices }, ownerUsername, ownerVoiceName: env.APP_OWNER_VOICE_NAME || "my voice" });
-  const sessions = new Map(), conversations = new Map(), previews = new Map(), upgrading = new Map(), summaries = new Map();
+  const sessions = new Map(), conversations = new Map(), previews = new Map(), upgrading = new Map(), summaries = new Map(), recentSessions = new Map();
   const loginIp = new WindowLimiter(number(env, "MAX_LOGIN_ATTEMPTS", 8), 600000);
   const loginGlobal = new WindowLimiter(100, 600000, 1);
   const previewRate = new WindowLimiter(number(env, "MAX_PREVIEW_TTS_REQUESTS_PER_HOUR", 20), 3600000);
@@ -249,24 +250,35 @@ function createApplication(env = process.env) {
         if (socket.destroyed) return;
         if (!session(req)) return reject(socket, 401);
         if (previews.has(auth.username)) return reject(socket, 409);
+        // A phone that lost signal reconnects before the server notices the dead socket;
+        // the same login takes over its own conversation instead of being refused.
+        let resumed = Date.now() - (recentSessions.get(auth.id) ?? -Infinity) < RESUME_WINDOW_MS;
+        for (const c of [...conversations.values()]) if (c.auth.id === auth.id) { c.end("Rozhovor pokračuje v novom spojení.", "replaced"); resumed = true; }
         if (conversations.size + upgrading.size >= maxTotal ||
             [...conversations.values()].filter(c => c.ip === ip).length + [...upgrading.values()].filter(c => c.ip === ip).length >= maxIp) return reject(socket, 429);
         if ([...conversations.values()].some(c => c.auth.username === auth.username) ||
             [...upgrading.values()].some(c => c.username === auth.username)) return reject(socket, 409);
         upgrading.set(socket, { username: auth.username, ip });
         socket.once("close", () => upgrading.delete(socket));
-        if (!store.reserve(auth.username, { sessions: 1 })) {
-          upgrading.delete(socket);
-          return reject(socket, 429);
-        }
+        // Reconnects within the resume window continue the same conversation and do not count as a new session.
+        const admitted = resumed || store.reserve(auth.username, { sessions: 1 });
         wss.handleUpgrade(req, socket, head, client => {
           upgrading.delete(socket);
+          // Without a listener a malformed frame would throw and stop the whole process.
+          client.on("error", () => client.terminate());
           if (!session(req)) return client.terminate();
+          if (!admitted) {
+            // Accepting first lets the client show the real reason instead of a generic connection error.
+            const id = crypto.randomUUID();
+            client.send(JSON.stringify({ type: "session_open", conversation_id: id }));
+            client.send(JSON.stringify({ type: "error", code: "quota_exceeded", fatal: true, message: "Denný limit rozhovorov bol vyčerpaný.", conversation_id: id }));
+            return client.close(4000, "quota_exceeded");
+          }
           try {
             const conversation = new SpeechSession(client, {
               auth, ip, store, catalog, apiKey: env.SONIOX_API_KEY, urls, limits: sessionLimits,
               endpoint, transport: normalizeTtsTransport(env.TTS_TRANSPORT),
-              onClose: summary => { conversations.delete(client); summaries.set(auth.username, summary); },
+              onClose: summary => { conversations.delete(client); summaries.set(auth.username, summary); recentSessions.set(auth.id, Date.now()); },
             });
             conversations.set(client, conversation);
           } catch { client.terminate(); }
@@ -279,6 +291,7 @@ function createApplication(env = process.env) {
   });
   const cleanup = setInterval(() => {
     for (const [id, auth] of sessions) if (Date.now() >= auth.expiresAt) destroy(id);
+    for (const [id, at] of recentSessions) if (Date.now() - at >= RESUME_WINDOW_MS || !sessions.has(id)) recentSessions.delete(id);
     loginIp.prune(); loginGlobal.prune(); previewRate.prune();
     try { store.prune(); } catch { /* Subsequent paid operations fail closed. */ }
   }, 60000);
