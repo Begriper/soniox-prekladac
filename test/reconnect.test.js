@@ -1,6 +1,7 @@
 "use strict";
 const test = require("node:test"), assert = require("node:assert/strict");
 const WebSocket = require("ws");
+const net = require("node:net");
 const { fixture, until } = require("./helpers/mock-runtime.cjs");
 
 const ready = ws => until(() => ws.messages.some(m => m.type === "server_ready"));
@@ -48,6 +49,18 @@ test("a reconnect within the resume window does not use another daily session", 
   assert.equal(err.code, "quota_exceeded");
   assert.equal(err.fatal, true);
   assert.equal(err.conversation_id, other.messages.find(m => m.type === "session_open").conversation_id);
+  // An unmasked client frame is a protocol error; it must not crash the server.
+  const probeCookie = await f.login();
+  await new Promise(resolve => {
+    const { port } = new URL(f.url);
+    const socket = net.connect(Number(port), "127.0.0.1", () => {
+      socket.write(["GET / HTTP/1.1", "Host: 127.0.0.1", "Upgrade: websocket", "Connection: Upgrade",
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version: 13", "Origin: " + f.origin, "Cookie: " + probeCookie, "", ""].join("\r\n"));
+      socket.write(Buffer.from([0x81, 0x01, 0x61]));
+    });
+    socket.on("error", () => {}); socket.on("close", resolve); socket.resume();
+  });
+  assert.equal((await f.request("/health")).status, 200);
 });
 
 test("transient Soniox errors are retryable and credit problems are final", async t => {

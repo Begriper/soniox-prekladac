@@ -264,6 +264,8 @@ function createApplication(env = process.env) {
         const admitted = resumed || store.reserve(auth.username, { sessions: 1 });
         wss.handleUpgrade(req, socket, head, client => {
           upgrading.delete(socket);
+          // Without a listener a malformed frame would throw and stop the whole process.
+          client.on("error", () => client.terminate());
           if (!session(req)) return client.terminate();
           if (!admitted) {
             // Accepting first lets the client show the real reason instead of a generic connection error.
