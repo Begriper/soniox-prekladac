@@ -7,13 +7,15 @@ let playbackContext = null, playback = null, localPlayback = null, previewAbort 
 let entries = [], nodes = new Map(), audioCache = new Map(), audioCacheBytes = 0, ttsModel = "tts-rt-v2";
 let chosenA = "sk", chosenB = "de", voiceA = "Adrian", voiceB = "Adrian";
 let toastTimer, connectTimer, finishTimer, reconnectTimer, stableTimer, cancelRequest = "";
-let pttPressed = false, pttSide = "", pttEnding = false, vadHits = 0;
+let pttPressed = false, pttSide = "", pttEnding = false, pttDraining = false, vadHits = 0;
+let pending = [], pendingBytes = 0, lastFrameAt = 0, captureWatch = null;
 let reconnectAttempts = 0, resumePending = false, faceMode = false;
 let languageSide = "A", voiceSide = "A", voiceGender = "";
 const prefs = { conversationMode: "auto", outputMode: "speaker", ttsSpeed: "1", profileId: "conversation" };
 const MAX_CACHE = 12 * 1024 * 1024;
 const RECONNECTABLE = new Set(["stt_connection", "stt_timeout", "stt_retry"]);
 const STABLE_MS = 30000;
+const START_BUFFER_BYTES = 3 * 16000 * 2;
 const STATE_LABELS = { idle: "Pripravený", connecting: "Pripájam…", listening: "Počúvam", translating: "Prekladám", speaking: "Hovorím", finishing: "Dokončujem preklad…", confirm_language: "Potvrď jazyk", reconnecting: "Obnovujem spojenie…", paused: "Pozastavené" };
 const AUDIO_LABELS = { pending: "Čaká", queued: "Vo fronte", played: "Prehrané", interrupted: "Prerušené", not_spoken: "Neprehrané", text_only: "Iba text" };
 const store = {
@@ -416,6 +418,8 @@ function receive(msg) {
     ready = true; clearTimeout(connectTimer); clearTimeout(stableTimer);
     // A connection that drops again right after opening must not refill the retry budget.
     stableTimer = setTimeout(() => { reconnectAttempts = 0; }, STABLE_MS);
+    const frames = pending; pending = []; pendingBytes = 0;
+    for (const frame of frames) sendPcm(frame);
     controls();
   }
   if (msg.type === "state") {
@@ -464,8 +468,13 @@ function receive(msg) {
 
 /* ---------- microphone ---------- */
 function sendPcm(buffer, flush = false) {
-  if (!running || (!ready && !flush) || muted || (stopping && !flush) || socket?.readyState !== WebSocket.OPEN) return;
-  if (prefs.conversationMode === "ptt" && !pttPressed) return;
+  if (!running || muted || (stopping && !flush)) return;
+  if (prefs.conversationMode === "ptt" && !pttPressed && !pttDraining) return;
+  // People start talking right after the tap; speech captured while the connection opens is sent once it is ready.
+  if (!ready || socket?.readyState !== WebSocket.OPEN) {
+    if (!stopping && pendingBytes + buffer.byteLength <= START_BUFFER_BYTES) { pending.push(buffer); pendingBytes += buffer.byteLength; }
+    return;
+  }
   // With headphones, loud new speech interrupts the translation that is playing.
   if (prefs.conversationMode === "auto" && outputMode() === "headphones" && playback?.started && Date.now() - playback.createdAt > 300) {
     const pcm = new Int16Array(buffer); let energy = 0;
@@ -492,18 +501,39 @@ async function startCapture(currentEpoch) {
   if (epoch !== currentEpoch) return;
   worklet = new AudioWorkletNode(captureContext, "pcm-capture-processor", { processorOptions: { targetSampleRate: 16000, chunkSize: 1024 } });
   worklet.port.onmessage = event => {
-    if (event.data.type === "audio") sendPcm(event.data.buffer, event.data.flush);
-    if (event.data.type === "flushed") { flushResolve?.(); flushResolve = null; }
+    if (event.data.type === "audio") { lastFrameAt = Date.now(); sendPcm(event.data.buffer, event.data.flush); }
+    if (event.data.type === "flushed") flushResolve?.();
   };
+  // A phone call, a disconnected Bluetooth headset or another app taking the microphone would
+  // otherwise leave the UI saying "listening" while no audio arrives.
+  worklet.onprocessorerror = () => captureLost(currentEpoch);
+  let muteTimer;
+  for (const track of stream.getAudioTracks()) {
+    track.addEventListener("ended", () => captureLost(currentEpoch));
+    track.addEventListener("mute", () => { clearTimeout(muteTimer); muteTimer = setTimeout(() => captureLost(currentEpoch), 3000); });
+    track.addEventListener("unmute", () => clearTimeout(muteTimer));
+  }
+  const context = captureContext;
+  context.addEventListener("statechange", () => { if (captureContext === context && context.state !== "running" && context.state !== "closed") void context.resume().catch(() => {}); });
+  lastFrameAt = Date.now();
   source.connect(worklet); worklet.connect(gain);
 }
+function captureLost(token) {
+  if (epoch !== token || !running || stopping) return;
+  send({ type: "client_stop" }); disconnect(); resumePending = true;
+  error("Mikrofón sa prerušil (hovor, slúchadlá alebo iná appka). Ťukni na Pokračovať.");
+  controls();
+}
+function flushWorklet() {
+  if (!worklet) return Promise.resolve();
+  return new Promise(resolve => {
+    const done = () => { if (flushResolve === done) flushResolve = null; resolve(); };
+    flushResolve = done; worklet.port.postMessage({ type: "flush" });
+    setTimeout(done, 300);
+  });
+}
 async function stopCapture(flush) {
-  if (flush && worklet) {
-    await new Promise(resolve => {
-      flushResolve = resolve; worklet.port.postMessage({ type: "flush" });
-      setTimeout(() => { if (flushResolve === resolve) { flushResolve = null; resolve(); } }, 300);
-    });
-  }
+  if (flush) await flushWorklet();
   if (worklet) { worklet.port.onmessage = null; worklet.disconnect(); worklet = null; }
   media?.getTracks().forEach(t => t.stop()); media = null;
   const context = captureContext; captureContext = null; if (context && context.state !== "closed") await context.close();
@@ -526,6 +556,7 @@ async function start(automatic = false) {
   try {
     await unlockAudio(automatic ? 400 : 0); if (epoch !== token) return;
     await startCapture(token); if (epoch !== token || !running) return;
+    captureWatch = setInterval(() => { if (Date.now() - lastFrameAt > 4000) captureLost(token); }, 2000);
     await lockScreen(); if (epoch !== token) return;
     const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host); socket = ws; ws.binaryType = "arraybuffer";
     connectTimer = setTimeout(() => { if (socket === ws && !ready) connectionLost(); }, 12000);
@@ -557,16 +588,17 @@ function connectionLost() {
   reconnectTimer = setTimeout(() => { reconnectTimer = null; void start(true).catch(e => error(e.message)); }, delay);
   controls();
 }
-async function pause() {
+async function pause(background = false) {
   if (stopping) return;
-  haptic();
+  if (!background) haptic();
   if (!socket || socket.readyState !== WebSocket.OPEN) { disconnect(); return; }
   stopping = true; controls(); await stopCapture(true);
   send({ type: "client_stop" });
-  finishTimer = setTimeout(() => { error("Dokončenie trvalo príliš dlho."); disconnect(); }, 125000);
+  // A hidden page may be frozen at any moment, so it waits only briefly for the last sentence.
+  finishTimer = setTimeout(() => { if (!background) error("Dokončenie trvalo príliš dlho."); disconnect(); }, background ? 1500 : 125000);
 }
 function disconnect() {
-  epoch++; cancelRequest = ""; clearTimeout(connectTimer); clearTimeout(finishTimer); clearTimeout(reconnectTimer); clearTimeout(stableTimer); reconnectTimer = null;
+  epoch++; cancelRequest = ""; clearTimeout(connectTimer); clearTimeout(finishTimer); clearTimeout(reconnectTimer); clearTimeout(stableTimer); clearInterval(captureWatch); reconnectTimer = null; pending = []; pendingBytes = 0; pttDraining = false;
   const ws = socket; socket = null;
   if (ws) { ws.onclose = null; ws.onerror = null; ws.onmessage = null; try { ws.close(); } catch {} }
   const changed = [];
@@ -644,9 +676,12 @@ function beginPtt(side) {
 }
 async function finishPtt(side) {
   if (!pttPressed || pttSide !== side) return;
-  pttPressed = false; pttSide = ""; pttEnding = true;
+  pttPressed = false; pttSide = ""; pttEnding = true; pttDraining = true;
   $("ptt" + side).classList.remove("pressed"); controls();
   const ws = socket;
+  // The worklet still holds up to 64 ms of the last word; it must go out before the silence.
+  await flushWorklet();
+  pttDraining = false;
   // Ten 20 ms zero frames give Soniox the silence required before finalize.
   for (let i = 0; i < 10 && socket === ws && ws?.readyState === WebSocket.OPEN; i++) {
     ws.send(new Int16Array(320).buffer);
@@ -717,7 +752,7 @@ function connectivity() {
 window.addEventListener("online", connectivity); window.addEventListener("offline", connectivity);
 document.addEventListener("visibilitychange", () => {
   // Mobile browsers suspend the microphone in the background: finish cleanly and offer one-tap resume.
-  if (document.visibilityState === "hidden" && running) { send({ type: "client_stop" }); disconnect(); resumePending = true; controls(); }
+  if (document.visibilityState === "hidden" && running) { resumePending = true; void pause(true).catch(() => disconnect()).finally(controls); }
   else if (document.visibilityState === "visible" && running && !wakeLock) void lockScreen();
 });
 window.addEventListener("pagehide", () => { send({ type: "client_stop" }); disconnect(); });
