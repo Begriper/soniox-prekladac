@@ -28,7 +28,11 @@ Bez externých API môžeš spustiť node scripts/mock-app.cjs a otvoriť http:/
 
 ## Prevádzka a bezpečnosť
 
-SQLite ukladá iba denné rezervácie spotreby a katalógy modelov, žiadny rozhovor. Lokálne používa .local-data/usage.sqlite, v produkcii /data/usage.sqlite. Pri chybe účtovania nové platené operácie zlyhajú bezpečne. Rezervácie sú konzervatívne: aj neúspešný pokus/fallback môže stáť kredit, preto sa nevracia. STT sa rezervuje po 10 sekundách pripojenia, TTS podľa počtu pokusov a znakov; ide o limity aplikácie, nie faktúru Sonioxu. Denný reset je o polnoci UTC.
+SQLite ukladá účty s heslami hashovanými cez scrypt, hashe prihlásení, audit, denné rezervácie spotreby (400 dní) a katalógy modelov, žiadny rozhovor. Lokálne používa .local-data/usage.sqlite, v produkcii /data/usage.sqlite. Pri chybe účtovania nové platené operácie zlyhajú bezpečne. Rezervácie sú konzervatívne: aj neúspešný pokus/fallback môže stáť kredit, preto sa nevracia. STT sa rezervuje po 10 sekundách pripojenia, TTS podľa počtu pokusov a znakov; ide o limity aplikácie, nie faktúru Sonioxu. Denný reset aj začiatok mesiaca pre voliteľný mesačný limit STT sú v UTC.
+
+Pri prvom štarte s prázdnou tabuľkou `users` sa `APP_ACCESS_CODES` importujú ako mená a heslá; vlastník (`APP_OWNER_USERNAME`, pri jedinom účte automaticky tento účet) dostane rolu `admin`. Prihlásenie používa meno a heslo, dočasne funguje aj samotný pôvodný kód bez mena. Prihlásenia trvajú predvolene 30 dní a prežijú reštart pri zachovaní SQLite súboru aj `SESSION_SECRET`.
+
+`APP_ACCESS_CODES` zostáva povinné. Kód vlastníka z env je núdzový vstup (break-glass): vždy obnoví rolu admina a odblokuje účet aj po zmene hesla v DB. Chráň ho ako administrátorské heslo. Chýbajúci účet vlastníka sa obnoví; fyzicky poškodený alebo neprístupný SQLite súbor treba najprv obnoviť zo zálohy. Zmeny ostatných env kódov už existujúce DB heslá nemenia.
 
 API kľúč zostáva na serveri. Session cookie je podpísaná, HttpOnly, SameSite=Strict a v produkcii Secure. Odhlásenie/expirácia rušia príslušné WebSockety a syntézu. Origin sa overuje presne. X-Forwarded-For sa nepoužíva; TRUST_FLY_PROXY=true je určené iba pre Fly Proxy bez priameho verejného prístupu na aplikačný port.
 
@@ -61,7 +65,7 @@ Staré nastavenia MAX_TTS_QUEUE, MAX_TTS_CHARS, MAX_TEXT_CHARS, MAX_WS_MESSAGE_K
 - `/api/voices` načíta všetky stránky `/v1/shared-voices` a zoznam vlastných hlasov. Pri nedostupnom API zostanú vstavané hlasy z posledného modelového katalógu; klon sa zamietne.
 - Profil sa vyberá pred začiatkom relácie. Kontextové výrazy sú orientačné pomôcky pre Soniox; pri medicíne a úradoch vždy over výsledný text. Len jednoznačné skratky CNC/CAD/CAM majú pevné `translation_terms`.
 - AUTO je predvolený režim. PTT drží audio otvorené, pri pustení pošle približne 200 ms ticha a `finalize`; relácia pokračuje po `<fin>`. Pri slúchadlách lokálna detekcia hlasnej novej reči preruší práve prehrávaný hlas. Pri reproduktore zostáva striedanie počúvania a prehrávania.
-- Vlastník môže cez Nastavenia zrušiť prístup ďalšieho účtu. Zrušenie sa uloží do SQLite a uzavrie jeho aktívne relácie. Pre nový prístup treba vymeniť jeho kód v konfigurácii a zaviesť samostatnú obnovu revokácie; aplikácia zámerne neobnovuje starý kód automaticky.
+- Admin môže cez Nastavenia zablokovať ďalší účet. Blokovanie sa uloží do SQLite a uzavrie jeho aktívne relácie. Vlastný účet ani posledného aktívneho admina nemožno zablokovať. Pôvodné zrušené účty sa pri migrácii zablokujú; ich odblokovanie a úplná správa účtov prídu v ďalšom admin balíku.
 
 ### Staging kontrola pred produkciou
 

@@ -42,8 +42,10 @@
       <h1>Prekladač</h1>
       <p class="login-sub">Živý hlasový preklad pre rozhovor tvárou v tvár.</p>
       <form id="loginForm" class="login-form">
-        <label for="accessCode" class="sr-only">Prístupový kód</label>
-        <input id="accessCode" type="password" autocomplete="current-password" placeholder="Prístupový kód" required maxlength="512">
+        <label for="username" class="sr-only">Meno</label>
+        <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="Meno" maxlength="40">
+        <label for="accessCode" class="sr-only">Heslo</label>
+        <input id="accessCode" name="password" type="password" autocomplete="current-password" placeholder="Heslo" required maxlength="512">
         <button class="btn btn-primary btn-block" type="submit">Pokračovať</button>
         <p id="loginStatus" class="login-status" role="status"></p>
       </form>

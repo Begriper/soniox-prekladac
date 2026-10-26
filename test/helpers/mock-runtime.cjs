@@ -66,7 +66,7 @@ async function fixture(options = {}) {
   const origin = "http://127.0.0.1:" + (options.port || 3000);
   const runtime = createApplication({
     SONIOX_API_KEY: "mock-provider-key", SESSION_SECRET: "test-session-secret-not-for-production-1234",
-    APP_ACCESS_CODES: "owner:" + CODE + ",family:family-test-access-123456", APP_ORIGINS: origin,
+    APP_ACCESS_CODES: "owner:" + CODE + ",family:family-test-access-123456", APP_OWNER_USERNAME: "owner", APP_ORIGINS: origin,
     USAGE_DB_PATH: options.db || ":memory:", PORT: String(options.port || 3000),
     SONIOX_STT_URL: base.replace("http", "ws") + "/stt",
     SONIOX_TTS_WS_URL: base.replace("http", "ws") + "/tts",
@@ -78,7 +78,8 @@ async function fixture(options = {}) {
   async function request(path, body, cookie) {
     return fetch(url + path, { method: body === undefined ? "GET" : "POST", headers: { Origin: origin, "Content-Type": "application/json", ...(cookie ? { Cookie: cookie } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   }
-  async function login() { return (await request("/api/login", { code: CODE })).headers.get("set-cookie").split(";")[0]; }
+  await runtime.ready;
+  async function login(username, password) { return (await request("/api/login", username === undefined ? { code: CODE } : { username, password })).headers.get("set-cookie").split(";")[0]; }
   async function connect(cookie, config = { language_a: "sk", language_b: "de" }) {
     const ws = new WebSocket(url.replace("http", "ws"), { origin, headers: { Cookie: cookie } });
     ws.messages = []; ws.audio = [];

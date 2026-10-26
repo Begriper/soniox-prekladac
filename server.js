@@ -5,6 +5,7 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const WebSocket = require("ws");
 const { UsageStore } = require("./usage-store");
+const { hashPassword, verifyPassword } = require("./passwords");
 const { Catalog } = require("./catalog");
 const { SpeechSession } = require("./speech-session");
 const { PROFILES } = require("./context-profiles");
@@ -77,15 +78,36 @@ function createApplication(env = process.env) {
     sensitivity: number(env, "ENDPOINT_SENSITIVITY", 0, -1, 1),
   };
   if (!Number.isInteger(endpoint.level)) throw new Error("Invalid endpoint level");
-  const ttl = number(env, "SESSION_TTL_MINUTES", 720, 1, 43200) * 60000;
+  const ttl = number(env, "SESSION_TTL_MINUTES", 43200, 1, 43200) * 60000;
   const maxTotal = number(env, "MAX_ACTIVE_WS_TOTAL", 3, 1, 100);
   const maxIp = number(env, "MAX_ACTIVE_WS_PER_IP", 2, 1, 100);
   const store = new UsageStore(env.USAGE_DB_PATH || (production ? "/data/usage.sqlite" : path.join(__dirname, ".local-data", "usage.sqlite")), limits);
   const catalog = new Catalog({ store, apiKey: env.SONIOX_API_KEY, urls: { stt: urls.sttModels, tts: urls.ttsModels, shared: urls.sharedVoices, custom: urls.customVoices }, ownerUsername, ownerVoiceName: env.APP_OWNER_VOICE_NAME || "my voice" });
-  const sessions = new Map(), conversations = new Map(), previews = new Map(), upgrading = new Map(), summaries = new Map(), recentSessions = new Map();
+  const conversations = new Map(), previews = new Map(), upgrading = new Map(), summaries = new Map(), recentSessions = new Map();
   const loginIp = new WindowLimiter(number(env, "MAX_LOGIN_ATTEMPTS", 8), 600000);
   const loginGlobal = new WindowLimiter(100, 600000, 1);
+  const loginUsername = new WindowLimiter(10, 600000);
   const previewRate = new WindowLimiter(number(env, "MAX_PREVIEW_TTS_REQUESTS_PER_HOUR", 20), 3600000);
+  let dummyHash;
+  const ready = (async () => {
+    dummyHash = await hashPassword(crypto.randomBytes(32).toString("base64url"));
+    if (!store.listUsers().length) {
+      const imported = [];
+      for (const user of users) imported.push({ ...user, passwordHash: await hashPassword(user.code) });
+      store.db.exec("BEGIN IMMEDIATE");
+      try {
+        if (!store.listUsers().length) for (const user of imported) {
+          const role = user.username === ownerUsername ? "admin" : "user";
+          store.createUser({ username: user.username, role, passwordHash: user.passwordHash });
+          store.audit("system", "bootstrap_import", user.username, { role });
+        }
+        store.migrateRevokedUsers();
+        store.db.exec("COMMIT");
+      } catch (err) { store.db.exec("ROLLBACK"); throw err; }
+    }
+  })();
+  // Callers retain the synchronous factory; requests and startup wait for scrypt import.
+  void ready.catch(() => {});
   const app = express(), server = http.createServer(app);
   const wss = new WebSocket.Server({ noServer: true, maxPayload: 128 * 1024, perMessageDeflate: false });
   app.disable("x-powered-by");
@@ -103,10 +125,13 @@ function createApplication(env = process.env) {
     next();
   });
   app.use(express.json({ limit: "8kb", strict: true }));
+  app.use((_req, _res, next) => { void ready.then(() => next(), next); });
   const sign = id => crypto.createHmac("sha256", secret).update(id).digest("base64url");
+  const sessionHash = id => crypto.createHash("sha256").update(id).digest("hex");
   const cookie = (value, seconds) => COOKIE + "=" + value + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" + seconds + (production ? "; Secure" : "");
   function destroy(id) {
-    sessions.delete(id);
+    store.deleteSession(sessionHash(id));
+    recentSessions.delete(id);
     for (const conversation of conversations.values()) if (conversation.auth.id === id) conversation.end("Prihlásenie bolo ukončené.", "auth_expired");
     for (const p of previews.values()) if (p.sessionId === id) p.abort.abort();
   }
@@ -115,9 +140,12 @@ function createApplication(env = process.env) {
     if (!value || !/^[\w-]{43}\.[\w-]{43}$/.test(value)) return null;
     const [id, signature] = value.split(".");
     if (!equal(sign(id), signature)) return null;
-    const auth = sessions.get(id);
-    if (auth && (Date.now() >= auth.expiresAt || store.isRevoked(auth.username))) { destroy(id); return null; }
-    return auth || null;
+    const row = store.getSession(sessionHash(id));
+    if (!row) return null;
+    const user = store.getUser(row.username), now = Date.now();
+    if (now >= row.expires_at || !user || user.disabled_at) { destroy(id); return null; }
+    if (now - row.last_seen_at >= 60000) store.touchSession(row.id_hash, now);
+    return { id, username: row.username, expiresAt: row.expires_at, role: user.role };
   }
   function requireSession(req, res, next) {
     req.auth = session(req);
@@ -125,23 +153,52 @@ function createApplication(env = process.env) {
     next();
   }
   const route = fn => (req, res, next) => Promise.resolve().then(() => fn(req, res)).catch(next);
-  const usage = username => ({ ...store.read(username), limits, user: username });
+  const usage = username => ({ ...store.read(username), limits: store.limitsFor(username), user: username });
   app.get("/health", (_req, res) => res.json({ ok: true }));
   app.get("/api/config", (req, res) => res.json({ appVersion: APP_VERSION, requiresLogin: true, loggedIn: Boolean(session(req)), defaultVoice: "Adrian", defaultEndpointDelayMs: endpoint.delay, ttsModel: TTS_MODEL, profiles: Object.entries(PROFILES).map(([id, value]) => ({ id, label: value.label })) }));
-  app.post("/api/login", (req, res) => {
+  app.post("/api/login", route(async (req, res) => {
     const ip = clientIp(req, env.TRUST_FLY_PROXY === "true" && Boolean(env.FLY_APP_NAME));
     if (!loginIp.allow(ip) || !loginGlobal.allow("all")) return res.status(429).json({ error: "Príliš veľa pokusov. Skús neskôr." });
-    if (typeof req.body?.code !== "string" || req.body.code.length > 512) return res.status(401).json({ error: "Nesprávny prístupový kód." });
-    const user = users.find(u => equal(u.code, req.body.code.trim()));
-    if (!user || store.isRevoked(user.username)) return res.status(401).json({ error: "Nesprávny alebo zrušený prístupový kód." });
-    if (sessions.size >= 200) return res.status(429).json({ error: "Príliš veľa prihlásení." });
+    const legacy = req.body?.username === undefined && req.body?.password === undefined;
+    const username = typeof req.body?.username === "string" ? req.body.username.trim() : "";
+    const password = legacy ? req.body?.code : req.body?.password;
+    const denied = () => res.status(401).json({ error: "Nesprávne meno alebo heslo, alebo je účet zablokovaný." });
+    if (!legacy && !loginUsername.allow(username)) return res.status(429).json({ error: "Príliš veľa pokusov. Skús neskôr." });
+    if (typeof password !== "string" || password.length > 512 || (!legacy && !/^[\w.-]{1,40}$/.test(username))) return denied();
+    const pw = legacy ? password.trim() : password;
+    const owner = users.find(u => u.username === ownerUsername);
+    let user;
+    if (owner && (legacy || username === ownerUsername) && equal(owner.code, pw)) {
+      user = store.getUser(ownerUsername);
+      const recovering = !user || user.disabled_at || user.role !== "admin";
+      if (!user) {
+        const passwordHash = await hashPassword(owner.code);
+        user = store.getUser(ownerUsername) || store.createUser({ username: ownerUsername, role: "admin", passwordHash });
+      }
+      // The environment credential is an explicit recovery path, including a lost role.
+      if (recovering) {
+        store.statement("UPDATE users SET role='admin',disabled_at=NULL WHERE username=?").run(ownerUsername);
+        store.audit(ownerUsername, "break_glass", ownerUsername);
+      }
+    } else if (legacy) {
+      for (const candidate of store.listUsers()) if (!candidate.disabled_at && await verifyPassword(pw, candidate.password_hash)) { user = candidate; break; }
+    } else {
+      const candidate = store.getUser(username);
+      if (await verifyPassword(pw, candidate?.password_hash || dummyHash)) user = candidate;
+    }
+    // Re-read after async scrypt: an admin may have disabled the account meanwhile.
+    user = user && store.getUser(user.username);
+    if (!user || user.disabled_at) return denied();
+    store.pruneSessions(Date.now());
+    if (store.countSessions() >= 200) return res.status(429).json({ error: "Príliš veľa prihlásení." });
     const old = session(req); if (old) destroy(old.id);
-    const auth = { id: crypto.randomBytes(32).toString("base64url"), username: user.username, expiresAt: Date.now() + ttl };
-    sessions.set(auth.id, auth);
+    const auth = { id: crypto.randomBytes(32).toString("base64url"), username: user.username, expiresAt: Date.now() + ttl, role: user.role };
+    store.createSession({ idHash: sessionHash(auth.id), username: auth.username, expiresAt: auth.expiresAt, device: (req.headers["user-agent"] || "").slice(0, 120) });
+    store.touchLogin(user.username);
     res.setHeader("Set-Cookie", cookie(auth.id + "." + sign(auth.id), Math.floor(ttl / 1000)));
-    res.json({ authenticated: true, username: user.username, usage: usage(user.username) });
-  });
-  app.get("/api/session", requireSession, (req, res) => res.json({ authenticated: true, username: req.auth.username, expires_at: new Date(req.auth.expiresAt).toISOString(), usage: usage(req.auth.username) }));
+    res.json({ authenticated: true, username: user.username, role: user.role, usage: usage(user.username) });
+  }));
+  app.get("/api/session", requireSession, (req, res) => res.json({ authenticated: true, username: req.auth.username, role: req.auth.role, expires_at: new Date(req.auth.expiresAt).toISOString(), usage: usage(req.auth.username) }));
   app.post("/api/logout", (req, res) => {
     const auth = session(req); if (auth) destroy(auth.id);
     res.setHeader("Set-Cookie", cookie("", 0)); res.json({ ok: true });
@@ -153,15 +210,17 @@ function createApplication(env = process.env) {
   }));
   app.get("/api/voices", requireSession, route(async (req, res) => res.json(await catalog.voicesFor(req.auth.username))));
   app.get("/api/admin/users", requireSession, (req, res) => {
-    if (!ownerUsername || req.auth.username !== ownerUsername) return res.status(403).json({ error: "Prístup odmietnutý." });
-    res.json({ users: users.map(u => ({ username: u.username, owner: u.username === ownerUsername, revoked: store.isRevoked(u.username) })) });
+    if (req.auth.role !== "admin") return res.status(403).json({ error: "Prístup odmietnutý." });
+    res.json({ users: store.listUsers().map(u => ({ username: u.username, role: u.role, owner: u.username === ownerUsername, revoked: Boolean(u.disabled_at) })) });
   });
   app.post("/api/admin/users/:username/revoke", requireSession, (req, res) => {
-    if (!ownerUsername || req.auth.username !== ownerUsername) return res.status(403).json({ error: "Prístup odmietnutý." });
+    if (req.auth.role !== "admin") return res.status(403).json({ error: "Prístup odmietnutý." });
     const target = req.params.username;
-    if (target === ownerUsername || !users.some(u => u.username === target)) return res.status(400).json({ error: "Používateľa nemožno zrušiť." });
-    store.revokeUser(target);
-    for (const [id, auth] of sessions) if (auth.username === target) destroy(id);
+    if (target === req.auth.username || !store.getUser(target) || !store.setDisabled(target, true)) return res.status(400).json({ error: "Používateľa nemožno zrušiť." });
+    store.deleteUserSessions(target);
+    for (const c of conversations.values()) if (c.auth.username === target) destroy(c.auth.id);
+    const preview = previews.get(target); if (preview) preview.abort.abort();
+    store.audit(req.auth.username, "disable_user", target);
     res.json({ ok: true, username: target });
   });
   app.get("/api/diagnostics", requireSession, (req, res) => res.json({ version: APP_VERSION, models: { stt: STT_MODEL, tts: TTS_MODEL }, region, endpoint, transport: normalizeTtsTransport(env.TTS_TRANSPORT), active: conversations.size, usage: usage(req.auth.username), last_session_summary: summaries.get(req.auth.username) || null }));
@@ -171,7 +230,7 @@ function createApplication(env = process.env) {
     const abort = new AbortController();
     const operation = { abort, sessionId: req.auth.id };
     previews.set(username, operation);
-    const expiry = setTimeout(() => abort.abort(), Math.max(1, req.auth.expiresAt - Date.now()));
+    const expiry = setTimeout(() => abort.abort(), Math.max(1, Math.min(req.auth.expiresAt - Date.now(), 2147483647)));
     const disconnect = () => { if (!res.writableEnded) abort.abort(); };
     res.on("close", disconnect);
     try {
@@ -186,7 +245,7 @@ function createApplication(env = process.env) {
       const text = phrases[language] || "1, 2, 3.";
       if (!store.reserve(username, { ttsRequests: 1, ttsChars: [...text].length, previewTtsRequests: 1 })) return res.status(429).json({ error: "Denný limit hlasu." });
       const buffer = await synthesizeRest({ url: urls.ttsRest, apiKey: env.SONIOX_API_KEY, text, language, voice, signal: abort.signal });
-      if (abort.signal.aborted || !sessions.has(req.auth.id)) return;
+      if (abort.signal.aborted || !session(req)) return;
       if (!store.reserve(username, { ttsAudioBytes: buffer.length })) return res.status(429).json({ error: "Denný limit audia." });
       res.type("application/octet-stream").send(buffer);
     } catch (error) {
@@ -207,7 +266,7 @@ function createApplication(env = process.env) {
     const abort = new AbortController();
     const operation = { abort, sessionId: req.auth.id };
     previews.set(username, operation);
-    const expiry = setTimeout(() => abort.abort(), Math.max(1, req.auth.expiresAt - Date.now()));
+    const expiry = setTimeout(() => abort.abort(), Math.max(1, Math.min(req.auth.expiresAt - Date.now(), 2147483647)));
     const disconnect = () => { if (!res.writableEnded) abort.abort(); };
     res.on("close", disconnect);
     try {
@@ -222,7 +281,7 @@ function createApplication(env = process.env) {
       }
       if (!store.reserve(username, { ttsRequests: 1, ttsChars: [...text].length })) return res.status(429).json({ error: "Denný limit hlasu." });
       const buffer = await synthesizeRest({ url: urls.ttsRest, apiKey: env.SONIOX_API_KEY, text, language, voice, signal: abort.signal });
-      if (abort.signal.aborted || !sessions.has(req.auth.id)) return;
+      if (abort.signal.aborted || !session(req)) return;
       if (!store.reserve(username, { ttsAudioBytes: buffer.length })) return res.status(429).json({ error: "Denný limit audia." });
       res.type("application/octet-stream").send(buffer);
     } catch (error) {
@@ -243,6 +302,8 @@ function createApplication(env = process.env) {
     void (async () => {
       socket.on("error", () => socket.destroy());
       try {
+        await ready;
+        if (socket.destroyed) return;
         if (req.url !== "/" || !validOrigin(req, origins)) return reject(socket, 403);
         const auth = session(req); if (!auth) return reject(socket, 401);
         const ip = clientIp(req, env.TRUST_FLY_PROXY === "true" && Boolean(env.FLY_APP_NAME));
@@ -290,24 +351,30 @@ function createApplication(env = process.env) {
     })();
   });
   const cleanup = setInterval(() => {
-    for (const [id, auth] of sessions) if (Date.now() >= auth.expiresAt) destroy(id);
-    for (const [id, at] of recentSessions) if (Date.now() - at >= RESUME_WINDOW_MS || !sessions.has(id)) recentSessions.delete(id);
-    loginIp.prune(); loginGlobal.prune(); previewRate.prune();
-    try { store.prune(); } catch { /* Subsequent paid operations fail closed. */ }
+    try {
+      for (const c of conversations.values()) if (Date.now() >= c.auth.expiresAt || !store.getSession(sessionHash(c.auth.id)) || store.getUser(c.auth.username)?.disabled_at) destroy(c.auth.id);
+      for (const [username, p] of previews) if (!store.getSession(sessionHash(p.sessionId)) || store.getUser(username)?.disabled_at) p.abort.abort();
+      store.pruneSessions(Date.now());
+      for (const [id, at] of recentSessions) if (Date.now() - at >= RESUME_WINDOW_MS || !store.getSession(sessionHash(id))) recentSessions.delete(id);
+      store.prune();
+    } catch { /* Subsequent paid operations fail closed. */ }
+    loginIp.prune(); loginGlobal.prune(); loginUsername.prune(); previewRate.prune();
   }, 60000);
   cleanup.unref();
-  return { app, server, store, catalog, conversations, port, close: async () => {
+  return { app, server, store, catalog, conversations, port, ready, close: async () => {
     clearInterval(cleanup);
     for (const c of conversations.values()) { c.close(); c.client.terminate(); }
     for (const p of previews.values()) p.abort.abort();
-    await new Promise(resolve => server.close(resolve)); store.close();
+    await new Promise(resolve => server.close(resolve)); await ready.catch(() => {}); store.close();
   } };
 }
 if (require.main === module) {
   require("dotenv").config();
   try {
     const runtime = createApplication();
-    runtime.server.listen(runtime.port, "0.0.0.0", () => console.log("Translator " + APP_VERSION + " listening on " + runtime.port));
+    void runtime.ready.then(() => runtime.server.listen(runtime.port, "0.0.0.0", () => console.log("Translator " + APP_VERSION + " listening on " + runtime.port))).catch(async err => {
+      console.error("Startup failed: " + err.message); await runtime.close(); process.exitCode = 1;
+    });
     for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => { void runtime.close().then(() => process.exit(0)); });
   } catch (err) { console.error("Startup failed: " + err.message); process.exitCode = 1; }
 }

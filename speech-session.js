@@ -31,7 +31,7 @@ class SpeechSession {
     this.outbox = []; this.outboxBytes = 0; this.outboxTimer = null; this.drainWaiters = []; this.echoUntil = 0;
     this.synthesis = new SonioxTtsWebSocket({ url: this.urls.ttsWs, apiKey: this.apiKey, clientReferenceId: this.auth.username });
     this.configTimer = this.later(() => this.end("Konfigurácia neprišla včas."), 12000);
-    this.expiryTimer = this.later(() => this.end("Prihlásenie vypršalo.", "auth_expired"), Math.max(1, this.auth.expiresAt - Date.now()));
+    this.scheduleExpiry();
     this.limitTimer = this.later(() => this.stop(), this.limits.sessionMs);
     this.heartbeat = setInterval(() => {
       if (!this.isAlive) { this.close(); client.terminate(); return; }
@@ -54,6 +54,13 @@ class SpeechSession {
       if (binary) this.audio(data); else this.message(data);
     }));
     this.send({ type: "session_open", conversation_id: this.id, model: TTS_MODEL });
+  }
+  scheduleExpiry() {
+    const remaining = this.auth.expiresAt - Date.now();
+    this.expiryTimer = this.later(() => {
+      if (remaining <= 2147483647) this.end("Prihlásenie vypršalo.", "auth_expired");
+      else this.scheduleExpiry();
+    }, Math.max(1, Math.min(remaining, 2147483647)));
   }
   later(fn, ms) {
     const timer = setTimeout(() => { this.timerSet.delete(timer); this.guard(fn); }, ms);
