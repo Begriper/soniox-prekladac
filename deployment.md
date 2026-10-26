@@ -1,3 +1,19 @@
+# Bezpečnostná oprava závislostí — release 49, 2026-10-26
+
+Na výslovné schválenie používateľa nasadená vetva `fix/npm-audit-2026-10` (commit `2fa32ed`): `body-parser` 1.20.9 (GHSA-27r3-jxmh-p828) a `proxy-addr` 2.0.8 (GHSA-jqcg-44mw-7w3h), zmena iba v `package-lock.json`. Fly remote builder, iba existujúca Machine `8e2135b77993d8` vo `fra`; volume `vol_rnzld90dqg7mypkr` zostal pripojený, secrets sa nemenili.
+
+- Aktuálny image: `registry.fly.io/soniox-prekladac:deployment-01M5W2WR0W5BMNNDMWGNHJYCTW`
+- Predchádzajúci image na rollback: `registry.fly.io/soniox-prekladac:deployment-01M3AMZT466003KERDR2Y4DC5K`
+- Pred deployom: `fly config validate`, `npm run check`, 60 úspešných testov (lokálne Node 22.14), `npm audit --omit=dev` 0 zraniteľností.
+- Po deployi: release v49 `complete`, Machine `started` a `good state`, log `Translator 3.1.0 listening on 8080`. `/health`, `/`, `/app.js`, `/style.css`, `/sw.js`, `/manifest.webmanifest` HTTP 200; `/api/config` 3.1.0; neprihlásené `/api/session` a `/api/voices` 401; POST `/api/login` s cudzím Origin 403; CSP aj HSTS prítomné.
+- Prihlásený rozhovor na telefóne overuje používateľ. Machine nemá v `fly.toml` health check — doplniť samostatne.
+
+```powershell
+fly deploy --app soniox-prekladac --image registry.fly.io/soniox-prekladac:deployment-01M3AMZT466003KERDR2Y4DC5K --only-machines 8e2135b77993d8 --update-only --strategy immediate --yes
+```
+
+---
+
 # Produkčné nasadenie redizajnu — release 48, 2026-09-24
 
 Na výslovnú žiadosť používateľa bol aktuálny pracovný strom nasadený na Fly.io cez remote builder. Aktualizovaná bola iba existujúca Machine `8e2135b77993d8` v `fra`; šifrovaný volume `vol_rnzld90dqg7mypkr` zostal pripojený na `/data`. Secrets ani obsah volume sa nemenili.
