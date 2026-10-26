@@ -6,6 +6,7 @@ const path = require("node:path");
 const WebSocket = require("ws");
 const { UsageStore } = require("./usage-store");
 const { installAdminApi } = require("./admin-api");
+const { installPasskeyApi } = require("./passkeys");
 const { hashPassword, verifyPassword } = require("./passwords");
 const { Catalog } = require("./catalog");
 const { SpeechSession } = require("./speech-session");
@@ -14,7 +15,7 @@ const { synthesizeRest } = require("./tts-rest");
 const { STT_MODEL, TTS_MODEL } = require("./runtime-models");
 const { normalizeTtsTransport } = require("./tts-transport");
 const { parseCookies, equal, validOrigin, clientIp, WindowLimiter } = require("./security");
-const APP_VERSION = "3.3.0";
+const APP_VERSION = "3.4.0";
 const COOKIE = "sl_session";
 const RESUME_WINDOW_MS = 5 * 60000;
 const MAX_LOGINS_PER_USER = 10;
@@ -166,6 +167,26 @@ function createApplication(env = process.env) {
   }
   const route = fn => (req, res, next) => Promise.resolve().then(() => fn(req, res)).catch(next);
   const usage = username => ({ ...store.read(username), limits: store.limitsFor(username), user: username });
+  function finishLogin(req, res, user, action, before) {
+    const old = session(req);
+    const auth = { id: crypto.randomBytes(32).toString("base64url"), username: user.username, expiresAt: Date.now() + ttl, role: user.role };
+    store.db.exec("BEGIN IMMEDIATE");
+    try {
+      before?.();
+      store.pruneSessions(Date.now());
+      if (old) store.deleteSession(sessionHash(old.id));
+      store.trimUserSessions(user.username, MAX_LOGINS_PER_USER - 1);
+      store.createSession({ idHash: sessionHash(auth.id), username: auth.username, expiresAt: auth.expiresAt, device: (req.headers["user-agent"] || "").slice(0, 120) });
+      store.touchLogin(user.username);
+      if (action) store.audit(user.username, action, user.username);
+      store.db.exec("COMMIT");
+    } catch (err) { store.db.exec("ROLLBACK"); throw err; }
+    if (old) destroy(old.id);
+    for (const c of conversations.values()) if (c.auth.username === user.username && !store.getSession(sessionHash(c.auth.id))) destroy(c.auth.id);
+    const preview = previews.get(user.username); if (preview && !store.getSession(sessionHash(preview.sessionId))) preview.abort.abort();
+    res.append("Set-Cookie", cookie(auth.id + "." + sign(auth.id), Math.floor(ttl / 1000)));
+    res.json({ authenticated: true, username: user.username, role: user.role, usage: usage(user.username) });
+  }
   app.get("/health", (_req, res) => res.json({ ok: true }));
   app.get("/api/config", (req, res) => res.json({ appVersion: APP_VERSION, requiresLogin: true, loggedIn: Boolean(session(req)), defaultVoice: "Adrian", defaultEndpointDelayMs: endpoint.delay, ttsModel: TTS_MODEL, profiles: Object.entries(PROFILES).map(([id, value]) => ({ id, label: value.label })) }));
   app.post("/api/login", route(async (req, res) => {
@@ -204,16 +225,9 @@ function createApplication(env = process.env) {
     user = user && store.getUser(user.username);
     if (verified && user && (verified.password_hash !== user.password_hash || verified.created_at !== user.created_at)) return denied();
     if (!user || user.disabled_at) return denied();
-    store.pruneSessions(Date.now());
-    // A per-account cap instead of a global one: no account can fill the table and lock out the owner.
-    const old = session(req); if (old) destroy(old.id);
-    store.trimUserSessions(user.username, MAX_LOGINS_PER_USER - 1);
-    const auth = { id: crypto.randomBytes(32).toString("base64url"), username: user.username, expiresAt: Date.now() + ttl, role: user.role };
-    store.createSession({ idHash: sessionHash(auth.id), username: auth.username, expiresAt: auth.expiresAt, device: (req.headers["user-agent"] || "").slice(0, 120) });
-    store.touchLogin(user.username);
-    res.setHeader("Set-Cookie", cookie(auth.id + "." + sign(auth.id), Math.floor(ttl / 1000)));
-    res.json({ authenticated: true, username: user.username, role: user.role, usage: usage(user.username) });
+    finishLogin(req, res, user);
   }));
+  installPasskeyApi(app, { store, requireSession, finishLogin, origins, secret, production, env });
   app.get("/api/session", requireSession, (req, res) => res.json({ authenticated: true, username: req.auth.username, role: req.auth.role, expires_at: new Date(req.auth.expiresAt).toISOString(), usage: usage(req.auth.username) }));
   app.post("/api/logout", (req, res) => {
     const auth = session(req); if (auth) destroy(auth.id);
