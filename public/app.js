@@ -24,7 +24,7 @@ const store = {
 };
 
 /* ---------- small helpers ---------- */
-function toast(message) { const t = $("toast"); t.textContent = message; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => t.hidden = true, 3200); }
+function toast(message) { const t = $("toast"); (Array.from(document.querySelectorAll("dialog[open]")).at(-1) || document.body).append(t); t.textContent = message; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => t.hidden = true, 3200); }
 function error(message) { $("errorText").textContent = message || ""; $("errorBanner").hidden = !message; }
 function haptic() { try { navigator.vibrate?.(12); } catch {} }
 function name(code) { return code === "auto" ? "Rozpoznať jazyk" : languages.find(l => l.code === code)?.name || code; }
@@ -35,7 +35,7 @@ function capitalize(text) { return text ? text[0].toLocaleUpperCase("sk") + text
 function el(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
 function icon(id) { const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); const use = document.createElementNS("http://www.w3.org/2000/svg", "use"); use.setAttribute("href", "#" + id); svg.append(use); return svg; }
 function openSheet(id) { const d = $(id); if (!d.open) d.showModal(); }
-function closeSheets() { for (const d of document.querySelectorAll("dialog[open]")) d.close(); }
+function closeSheets() { for (const d of document.querySelectorAll("dialog[open]")) d.close(); document.body.append($("toast")); }
 
 function saveSettings() {
   store.set("langA", chosenA); store.set("langB", chosenB); store.set("voiceA", voiceA); store.set("voiceB", voiceB);
@@ -82,7 +82,7 @@ function controls() {
   $("faceBtn").setAttribute("aria-pressed", String(faceMode));
   $("facePanel").hidden = !faceMode;
   $("feed").hidden = faceMode;
-  for (const group of document.querySelectorAll(".segmented")) {
+  for (const group of document.querySelectorAll(".segmented[data-setting]")) {
     const value = prefs[group.dataset.setting];
     for (const b of group.querySelectorAll("button")) {
       b.setAttribute("aria-checked", String(b.dataset.value === value));
@@ -185,30 +185,184 @@ function ensureVoices() {
   if (!voices.some(v => v.id === voiceB)) voiceB = voices[0]?.id || "Adrian";
 }
 
-async function loadAccessUsers() {
-  const owner = user, data = await api("/api/admin/users");
-  if (owner !== user) return;
-  const list = $("accessUsers"); list.replaceChildren();
-  for (const row of data.users) {
-    const div = el("div", "access-row");
-    div.append(el("span", "", row.username + (row.owner ? " · vlastník" : row.revoked ? " · zrušený" : "")));
-    if (row.username !== user && !row.revoked) {
-      const button = el("button", "btn btn-danger", "Zrušiť prístup"); button.type = "button";
-      button.addEventListener("click", async () => {
-        if (!confirm("Zrušiť prístup používateľa " + row.username + " vrátane aktívnych relácií?")) return;
-        try { await api("/api/admin/users/" + encodeURIComponent(row.username) + "/revoke", { method: "POST", body: "{}" }); await loadAccessUsers(); toast("Prístup bol zrušený."); }
-        catch (err) { error(err.message); }
-      });
-      div.append(button);
+/* ---------- sheets: administration ---------- */
+let adminRole = false, adminUsers = [], selectedUser = "", adminVersion = 0, userVersion = 0, adminBusy = false, newRole = "user", selfPasswordReset = false;
+const LIMIT_FIELDS = [["limitMinutes", "sttSeconds", 60], ["limitChars", "ttsChars", 1], ["limitSessions", "sessions", 1], ["limitMonth", "sttSecondsMonth", 60]];
+const AUDIT_LABELS = { create_user: "Vytvorenie účtu", reset_password: "Nové heslo", set_limits: "Zmena limitov", set_role: "Zmena roly", disable_user: "Zablokovanie", enable_user: "Odblokovanie", logout_user: "Odhlásenie zariadení", delete_user: "Zmazanie účtu", bootstrap_import: "Import účtu", break_glass: "Núdzové prihlásenie" };
+function number(value, digits = 1) { return Number(value || 0).toLocaleString("sk", { maximumFractionDigits: digits }); }
+function minutes(data) { return number((data?.sttSeconds || 0) / 60); }
+function voiceMinutes(data) { return number((data?.ttsAudioBytes || 0) / 48000 / 60); }
+function usd(value) { return Number(value || 0).toLocaleString("sk", { style: "currency", currency: "USD", maximumFractionDigits: 4 }); }
+function relative(at) {
+  const time = typeof at === "number" ? at : Date.parse(at);
+  if (at == null || !Number.isFinite(time)) return "zatiaľ nikdy";
+  const seconds = Math.max(0, (Date.now() - time) / 1000);
+  if (seconds < 60) return "práve teraz";
+  if (seconds < 3600) return "pred " + Math.floor(seconds / 60) + " min";
+  if (seconds < 86400) return "pred " + Math.floor(seconds / 3600) + " h";
+  return new Intl.RelativeTimeFormat("sk", { numeric: "always" }).format(-Math.floor(seconds / 86400), "day");
+}
+function usageBar(label, value, limit) {
+  const box = el("div", "usage-bar"), head = el("div", "usage-label"), bounded = Number.isFinite(limit);
+  const ratio = bounded ? limit > 0 ? value / limit : value > 0 ? 1 : 0 : 0;
+  head.append(el("span", "", label), el("span", "", number(value) + " / " + (bounded ? number(limit) : "bez limitu")));
+  const track = el("div", "usage-track"), fill = el("div", "usage-fill" + (ratio > .8 ? " warning" : ""));
+  track.setAttribute("role", "meter"); track.setAttribute("aria-label", label); track.setAttribute("aria-valuemin", "0");
+  track.setAttribute("aria-valuemax", String(bounded ? Math.max(limit, 1) : Math.max(value, 1)));
+  track.setAttribute("aria-valuenow", String(Math.min(value, bounded ? Math.max(limit, 1) : Math.max(value, 1)))); track.setAttribute("aria-valuetext", head.textContent);
+  fill.style.width = Math.min(100, Math.max(0, ratio * 100)) + "%"; track.append(fill); box.append(head, track); return box;
+}
+function badges(row) {
+  const box = el("div", "badges");
+  if (row.active) { const dot = el("span", "dot active-dot"); dot.setAttribute("role", "img"); dot.setAttribute("aria-label", "Práve hovorí"); box.append(dot); }
+  if (row.role === "admin") box.append(el("span", "badge", "Admin"));
+  if (row.disabled) box.append(el("span", "badge blocked", "Zablokovaný"));
+  return box;
+}
+function stats(data, withCost = false) {
+  const box = el("div", "admin-stats");
+  for (const [label, value] of [["Rozpoznávanie", minutes(data) + " min"], ["Hlas", voiceMinutes(data) + " min"], ["Rozhovory", number(data?.sessions, 0)], ...(withCost ? [["Odhad", usd(data?.estimated_usd)]] : [])]) {
+    const cell = el("div"); cell.append(el("strong", "", value), el("span", "hint", label)); box.append(cell);
+  }
+  return box;
+}
+function detailRow(title, sub) { const row = el("div", "option"), main = el("div", "option-main"); main.append(el("span", "option-title", title), el("span", "option-sub", sub)); row.append(main); return row; }
+function adminError(err) { error(err.message); toast(err.message); }
+async function refreshAdmin() {
+  const version = ++adminVersion, owner = user; $("adminStatus").textContent = "Načítavam…";
+  try {
+    const [users, usage, audit] = await Promise.all([api("/api/admin/users"), api("/api/admin/usage?days=30"), api("/api/admin/audit?limit=20")]);
+    if (version !== adminVersion || owner !== user || !adminRole) return;
+    adminUsers = users.users; $("adminUsers").replaceChildren();
+    for (const row of adminUsers) {
+      const card = el("button", "option user-card"); card.type = "button";
+      const head = el("div", "user-card-head"); head.append(el("strong", "option-title", row.username), badges(row));
+      card.append(head, usageBar("Dnes · min", (row.today.sttSeconds || 0) / 60, row.limits_effective.sttSeconds / 60), el("span", "hint", "Prihlásenie " + relative(row.last_login_at)));
+      card.addEventListener("click", () => { void openUser(row.username).catch(adminError); }); $("adminUsers").append(card);
     }
-    list.append(div);
+    $("adminUsage").replaceChildren(stats(usage.totals, true));
+    const list = el("div", "list");
+    for (const row of usage.by_user) list.append(detailRow(row.username, minutes(row) + " min · hlas " + voiceMinutes(row) + " min · " + number(row.sessions, 0) + " rozh. · " + usd(row.estimated_usd)));
+    if (!usage.by_user.length) list.append(el("p", "hint", "Zatiaľ bez spotreby."));
+    list.append(el("h4", "group-title", "Najčastejšie jazykové páry"));
+    for (const row of [...usage.conversations.languages].sort((a, b) => b.count - a.count).slice(0, 5)) list.append(detailRow(row.pair, number(row.count, 0) + " rozhovorov"));
+    if (!usage.conversations.languages.length) list.append(el("p", "hint", "Zatiaľ bez rozhovorov."));
+    $("adminUsage").append(list); $("adminAudit").replaceChildren();
+    for (const row of audit.audit.slice(0, 20)) $("adminAudit").append(detailRow(row.actor + " · " + (AUDIT_LABELS[row.action] || "Zmena účtu"), new Date(row.at).toLocaleString("sk") + (row.target ? " · " + row.target : "")));
+    if (!audit.audit.length) $("adminAudit").append(el("p", "hint", "Zatiaľ bez zmien."));
+    $("adminStatus").textContent = "Aktualizované " + new Date().toLocaleTimeString("sk", { hour: "2-digit", minute: "2-digit" }); $("sonioxUsage").replaceChildren();
+    if (selectedUser && $("userSheet").open) {
+      const row = adminUsers.find(u => u.username === selectedUser);
+      if (row) { renderUser(row); await loadUserChart(row.username); } else $("userSheet").close();
+    }
+  } catch (err) {
+    if (version === adminVersion && owner === user) $("adminStatus").textContent = "Údaje sa nepodarilo obnoviť.";
+    throw err;
   }
 }
+async function openUser(username) {
+  if (adminBusy) return;
+  selectedUser = username; $("userInvitation").replaceChildren(); $("userInvitation").hidden = true;
+  renderUser(adminUsers.find(u => u.username === username)); openSheet("userSheet"); await loadUserChart(username);
+}
+function renderUser(row) {
+  $("userTitle").textContent = row.username; $("userBadges").replaceChildren(badges(row));
+  $("userNote").textContent = row.note || "Bez poznámky."; $("userUsage").replaceChildren(stats(row.month));
+  for (const [id, key, scale] of LIMIT_FIELDS) {
+    $(id).value = row.limits_override?.[key] == null ? "" : row.limits_override[key] / scale;
+    $(id).placeholder = row.limits_effective[key] == null ? "Bez limitu" : number(row.limits_effective[key] / scale);
+  }
+  const actions = $("userActions"); actions.replaceChildren();
+  const action = (label, path, body, question, danger = false) => {
+    const b = el("button", "btn " + (danger ? "btn-danger" : "btn-ghost"), label); b.type = "button"; b.disabled = adminBusy;
+    b.addEventListener("click", () => { if (!question || confirm(question)) void mutateUser(row.username, path, body).catch(adminError); }); actions.append(b);
+  };
+  action("Nové heslo", "password", {}, "Vytvoriť nové heslo pre " + row.username + " a odhlásiť všetky zariadenia?");
+  action("Odhlásiť všade", "logout", {}, "Odhlásiť všetky zariadenia používateľa " + row.username + "?");
+  if (row.username !== user) {
+    action(row.disabled ? "Odblokovať" : "Zablokovať", row.disabled ? "enable" : "disable", {}, row.disabled ? "" : "Zablokovať používateľa " + row.username + " a ukončiť jeho rozhovor?", !row.disabled);
+    action(row.role === "admin" ? "Používateľ" : "Admin", "role", { role: row.role === "admin" ? "user" : "admin" }, "Zmeniť rolu používateľa " + row.username + " na " + (row.role === "admin" ? "Používateľ" : "Admin") + "?");
+    action("Zmazať účet", "delete", {}, "Natrvalo zmazať účet " + row.username + "?", true);
+  }
+  $("userDevices").replaceChildren();
+  for (const session of row.sessions) $("userDevices").append(detailRow(String(session.device || "Neznáme zariadenie").slice(0, 80), "Aktivita " + relative(session.last_seen_at)));
+  if (!row.sessions.length) $("userDevices").append(el("p", "hint", "Žiadne prihlásené zariadenia."));
+}
+async function loadUserChart(username) {
+  const version = ++userVersion, owner = user; $("userChart").textContent = "Načítavam…";
+  try {
+    const usage = await api("/api/admin/usage?username=" + encodeURIComponent(username) + "&days=30");
+    if (version !== userVersion || selectedUser !== username || user !== owner || !$("userSheet").open) return;
+    const days = Array.from({ length: 30 }, (_, i) => { const day = new Date(Date.parse(usage.from + "T00:00:00Z") + i * 86400000).toISOString().slice(0, 10); return { day, value: usage.days.filter(d => d.day === day).reduce((n, d) => n + d.sttSeconds / 60, 0) }; });
+    const max = Math.max(1, ...days.map(d => d.value)), chart = el("div", "usage-chart");
+    chart.setAttribute("role", "img"); chart.setAttribute("aria-label", "Minúty rozpoznávania po dňoch (UTC): " + days.map(d => d.day + ": " + number(d.value)).join("; "));
+    for (const day of days) { const bar = el("div", "chart-bar"); bar.style.height = day.value / max * 100 + "%"; bar.title = day.day + ": " + number(day.value) + " min"; chart.append(bar); }
+    $("userChart").replaceChildren(chart, el("p", "hint", usage.from + " – " + usage.to + " · spolu " + minutes(usage.totals) + " min"));
+  } catch (err) { if (version === userVersion && selectedUser === username) $("userChart").textContent = err.message; }
+}
+function setAdminBusy(value) {
+  adminBusy = value;
+  for (const node of document.querySelectorAll(".admin-sheet button:not(.close-sheet), .admin-sheet input, .admin-sheet textarea")) node.disabled = value;
+}
+function readLimits(fields, existing = null) {
+  if (fields.every(([id]) => $(id).value.trim() === "")) return null;
+  const limits = { ...existing };
+  for (const [id, key, scale] of fields) {
+    const value = $(id).value.trim(); delete limits[key];
+    if (value !== "") { const n = Number(value) * scale; if (!Number.isFinite(n) || n < 0 || n > 1e12) throw new Error("Limit musí byť číslo od 0 do 1 000 000 000 000."); limits[key] = n; }
+  }
+  return Object.keys(limits).length ? limits : null;
+}
+function invitation(id, data) {
+  const box = $(id), text = "Prekladač: " + location.origin + "\nMeno: " + data.username + "\nHeslo: " + data.password;
+  box.replaceChildren(el("h3", "group-title", "Pozvánka"), el("pre", "invitation-text", text), el("p", "hint", "Heslo sa zobrazí iba teraz.")); box.hidden = false;
+  const buttons = el("div", "admin-actions"), copy = el("button", "btn btn-primary", "Kopírovať pozvánku"); copy.type = "button";
+  copy.addEventListener("click", async () => { try { await navigator.clipboard.writeText(text); toast("Pozvánka skopírovaná."); } catch { toast("Kopírovanie nie je dostupné."); } }); buttons.append(copy);
+  if (navigator.share) { const share = el("button", "btn btn-ghost", "Zdieľať"); share.type = "button"; share.addEventListener("click", () => { void navigator.share({ text }).catch(err => { if (err.name !== "AbortError") toast("Zdieľanie nie je dostupné."); }); }); buttons.append(share); }
+  box.append(buttons); box.scrollIntoView({ block: "nearest" });
+}
+async function mutateUser(username, path, body) {
+  if (adminBusy) return;
+  const owner = user, version = userVersion; setAdminBusy(true);
+  try {
+    if (username === user && (path === "password" || path === "logout")) { resumePending = false; disconnect(); }
+    const data = await api("/api/admin/users/" + encodeURIComponent(username) + "/" + path, { method: "POST", body: JSON.stringify(body) });
+    if (owner !== user) return;
+    if (path === "password" && selectedUser === username && version === userVersion && $("userSheet").open) invitation("userInvitation", data);
+    if (username === user && (path === "password" || path === "logout")) {
+      // Our cookie is now invalid; retain a reset invitation only until this sheet closes.
+      selfPasswordReset = path === "password" && $("userSheet").open;
+      if (!selfPasswordReset) await signOut(false);
+      return;
+    }
+    if (path === "delete" && selectedUser === username) $("userSheet").close();
+    toast("Zmena uložená.");
+    try { await refreshAdmin(); const session = await api("/api/session"); if (owner === user) showUsage(session.usage); } catch (err) { adminError(err); }
+  } finally {
+    setAdminBusy(false);
+    if (selfPasswordReset) for (const node of document.querySelectorAll("#limitsForm input, #limitsForm button, #userActions button")) node.disabled = true;
+  }
+}
+async function createUser(event) {
+  event.preventDefault(); if (adminBusy) return;
+  const owner = user, version = adminVersion;
+  try {
+    const body = { username: $("newUsername").value.trim(), role: newRole, limits: readLimits([["newMinutes", "sttSeconds", 60], ["newMonth", "sttSecondsMonth", 60]]) };
+    if ($("newPassword").value) body.password = $("newPassword").value;
+    if ($("newNote").value) body.note = $("newNote").value;
+    setAdminBusy(true);
+    const data = await api("/api/admin/users", { method: "POST", body: JSON.stringify(body) }); $("newPassword").value = "";
+    if (owner !== user) return;
+    if ($("newUserSheet").open && version === adminVersion) { $("newUserForm").hidden = true; invitation("newInvitation", data); }
+    await refreshAdmin();
+  } catch (err) { adminError(err); } finally { setAdminBusy(false); }
+}
+
 
 /* ---------- session ---------- */
 async function showApp(session) {
   user = session.username; $("loginShell").hidden = true; $("appShell").hidden = false; $("accessCode").value = "";
-  $("accessPanel").hidden = session.role !== "admin";
+  adminRole = session.role === "admin"; $("adminBtn").hidden = !adminRole;
   const owner = user;
   const [languageData, voiceData] = await Promise.all([api("/api/languages"), api("/api/voices")]);
   if (user !== owner) return;
@@ -224,18 +378,20 @@ async function showApp(session) {
   prefs.profileId = store.get("profileId", "conversation");
   if (![...$("profileId").options].some(o => o.value === prefs.profileId)) prefs.profileId = "conversation";
   voiceInfo(voiceData);
-  if (session.role === "admin") void loadAccessUsers().catch(e => error(e.message));
   $("catalogNote").textContent = languageData.stale || voiceData.stale ? "Katalóg sa teraz nedá obnoviť, používa sa posledný dostupný." : languages.length + " jazykov · " + voices.length + " hlasov · " + ttsModel;
   showUsage(session.usage); renderAll(); controls();
 }
 function showUsage(usage) {
   if (!usage) return;
-  $("usageInfo").textContent = "Prihlásený ako " + user + ". Dnes: " + Math.ceil((usage.sttSeconds || 0) / 60) + " min rozpoznávania, " + (usage.ttsRequests || 0) + " hlasových požiadaviek. Limity sa obnovujú o polnoci UTC.";
+  const limits = usage.limits || {};
+  $("usageInfo").replaceChildren(el("p", "hint account-name", "Prihlásený ako " + user), usageBar("Rozpoznávanie · min", (usage.sttSeconds || 0) / 60, limits.sttSeconds == null ? undefined : limits.sttSeconds / 60), usageBar("Hlasové znaky", usage.ttsChars || 0, limits.ttsChars), usageBar("Rozhovory", usage.sessions || 0, limits.sessions), el("p", "hint", "Denný reset: polnoc UTC."));
 }
 async function signOut(callServer = true) {
   epoch++; resumePending = false; stopLocal(); disconnect(); clearEntries(); closeSheets();
   if (callServer) { try { await api("/api/logout", { method: "POST", body: "{}" }); } catch { $("loginStatus").textContent = "Odhlásenie na serveri sa nepotvrdilo. Po obnovení internetu sa prihlás a odhlás znova."; } }
-  $("historyList").replaceChildren(); $("usageInfo").textContent = ""; $("accessUsers").replaceChildren();
+  $("historyList").replaceChildren(); $("usageInfo").replaceChildren();
+  adminVersion++; userVersion++; adminRole = false; adminUsers = []; selectedUser = ""; $("adminBtn").hidden = true;
+  for (const id of ["adminUsers", "adminUsage", "adminAudit", "sonioxUsage", "userDevices", "userChart", "userUsage", "userActions", "userBadges", "userNote", "userTitle"]) $(id).replaceChildren();
   user = null; $("loginShell").hidden = false; $("appShell").hidden = true; $("accessCode").value = "";
 }
 
@@ -664,7 +820,7 @@ function settingsChanged() {
   send({ type: "update_settings", voice_a: voiceA, voice_b: voiceB, output_mode: outputMode(), tts_enabled: ttsEnabled(), tts_speed: prefs.ttsSpeed });
   if (!ttsEnabled()) stopSound();
 }
-for (const group of document.querySelectorAll(".segmented")) {
+for (const group of document.querySelectorAll(".segmented[data-setting]")) {
   group.addEventListener("click", event => {
     const button = event.target.closest("button[data-value]"); if (!button || button.disabled) return;
     const key = group.dataset.setting;
@@ -739,7 +895,43 @@ $("confirmLanguageBtn").addEventListener("click", () => send({ type: "confirm_la
 for (const d of document.querySelectorAll("dialog")) {
   d.addEventListener("click", event => { if (event.target === d) d.close(); });
   d.querySelector(".close-sheet")?.addEventListener("click", () => d.close());
+  // A toast shown inside a sheet that closes right after (copy, save) must stay visible.
+  d.addEventListener("close", () => { const t = $("toast"); if (d.contains(t)) (Array.from(document.querySelectorAll("dialog[open]")).at(-1) || document.body).append(t); });
 }
+$("adminBtn").addEventListener("click", () => {
+  if (!adminRole) return;
+  $("settingsSheet").close(); $("auditDetails").open = false; openSheet("adminSheet"); void refreshAdmin().catch(adminError);
+});
+$("newUserBtn").addEventListener("click", () => {
+  if (adminBusy) return;
+  $("newUserForm").reset(); $("newUserForm").hidden = false; newRole = "user";
+  for (const b of $("newUserRole").children) b.setAttribute("aria-checked", String(b.dataset.value === newRole));
+  openSheet("newUserSheet");
+});
+$("newUserRole").addEventListener("click", event => {
+  const b = event.target.closest("[data-value]"); if (!b || adminBusy) return; newRole = b.dataset.value;
+  for (const button of $("newUserRole").children) button.setAttribute("aria-checked", String(button === b));
+});
+$("newUserForm").addEventListener("submit", createUser);
+$("limitsForm").addEventListener("submit", event => {
+  event.preventDefault(); const row = adminUsers.find(u => u.username === selectedUser); if (!row) return;
+  try { void mutateUser(row.username, "limits", { limits: readLimits(LIMIT_FIELDS, row.limits_override) }).catch(adminError); } catch (err) { adminError(err); }
+});
+for (const [sheet, card] of [["userSheet", "userInvitation"], ["newUserSheet", "newInvitation"]]) $(sheet).addEventListener("close", () => {
+  $(card).replaceChildren(); $(card).hidden = true;
+  if (sheet === "userSheet") { selectedUser = ""; userVersion++; if (selfPasswordReset) { selfPasswordReset = false; void signOut(false); } }
+  else $("newUserForm").reset();
+});
+$("sonioxUsageBtn").addEventListener("click", async () => {
+  const version = adminVersion, owner = user, button = $("sonioxUsageBtn"); button.disabled = true; $("sonioxUsage").textContent = "Načítavam…";
+  try {
+    const data = await api("/api/admin/soniox-usage", { signal: AbortSignal.timeout(60000) });
+    if (owner !== user || version !== adminVersion || !$("adminSheet").open) return;
+    $("sonioxUsage").replaceChildren(el("p", "hint", "Mesiac " + data.month + " · načítané " + new Date(data.fetched_at).toLocaleString("sk")), detailRow("Spolu", usd(data.total_usd)));
+    for (const row of data.by_reference) $("sonioxUsage").append(detailRow(row.client_reference_id || "Bez priradenia", usd(row.cost_usd)));
+  } catch (err) { if (owner === user && version === adminVersion) $("sonioxUsage").textContent = err.message; }
+  finally { button.disabled = adminBusy; }
+});
 $("newBtn").addEventListener("click", () => { if (dirty && !confirm("Zahodiť neuložený rozhovor?")) return; disconnect(); clearEntries(); error(""); closeSheets(); });
 $("copyBtn").addEventListener("click", () => {
   if (!entries.length) { toast("Rozhovor je prázdny."); return; }
@@ -769,7 +961,7 @@ window.addEventListener("pagehide", () => { send({ type: "client_stop" }); disco
 window.addEventListener("beforeunload", event => { if (dirty) { event.preventDefault(); event.returnValue = ""; } });
 connectivity();
 setInterval(async () => {
-  const owner = user; if (!owner || !navigator.onLine) return;
+  const owner = user; if (!owner || !navigator.onLine || adminBusy || selfPasswordReset) return;
   try {
     const [languageData, voiceData] = await Promise.all([api("/api/languages"), api("/api/voices")]);
     if (owner !== user) return;
