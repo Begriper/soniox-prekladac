@@ -12,7 +12,7 @@ const { synthesizeRest } = require("./tts-rest");
 const { STT_MODEL, TTS_MODEL } = require("./runtime-models");
 const { normalizeTtsTransport } = require("./tts-transport");
 const { parseCookies, equal, validOrigin, clientIp, WindowLimiter } = require("./security");
-const APP_VERSION = "3.1.0";
+const APP_VERSION = "3.2.0";
 const COOKIE = "sl_session";
 function number(env, key, fallback, min = 1, max = 1e12) {
   const value = Number(env[key] ?? fallback);

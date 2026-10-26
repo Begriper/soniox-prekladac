@@ -2,146 +2,176 @@
 <html lang="sk">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#081319">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#0b1116">
+  <meta name="color-scheme" content="dark">
   <meta name="description" content="Súkromný obojsmerný hlasový prekladač.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Prekladač">
   <title>Soniox prekladač</title>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-180.png">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <div id="offlineBanner" class="notice warning offline-banner" hidden>Si offline. Živý preklad potrebuje internet. Po obnovení spojenia pokračuj tlačidlom Obnoviť.</div>
+  <svg class="sprite" aria-hidden="true" focusable="false">
+    <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2.5"/></symbol>
+    <symbol id="i-swap" viewBox="0 0 24 24"><path d="M7 7h11l-3.5-3.5M17 17H6l3.5 3.5"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="18.5" cy="12" r="1.3"/></symbol>
+    <symbol id="i-face" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="M4 12h16M9 7.5h6M9 16.5h6"/></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4zM16 9.5l5 5M21 9.5l-5 5"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M5 7h14M10 7V4.5h4V7M7 7l1 12.5h8L17 7"/></symbol>
+    <symbol id="i-wave" viewBox="0 0 64 64"><path d="M10 22c7-8 15-8 22 0s15 8 22 0"/><path d="M10 42c7-8 15-8 22 0s15 8 22 0"/></symbol>
+  </svg>
 
-  <main id="loginShell" class="login-shell">
-    <div class="login-layout">
-      <section class="login-story" aria-labelledby="loginTitle">
-        <div class="login-story-top">
-          <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 64 64" focusable="false"><path d="M10 22c7-8 15-8 22 0s15 8 22 0"/><path d="M10 42c7-8 15-8 22 0s15 8 22 0"/><circle cx="10" cy="22" r="3"/><circle cx="54" cy="42" r="3"/></svg></span>
-          <span class="brand-wordmark">SONIOX <strong>PREKLADAČ</strong></span>
-        </div>
-        <div class="login-story-copy">
-          <p class="eyebrow">HLAS, KTORÝ SPÁJA</p>
-          <h1 id="loginTitle">Rozumieme si<span class="accent-stop">.</span></h1>
-          <p>Jeden telefón. Dva jazyky. Rozhovor, ktorý plynie prirodzene.</p>
-        </div>
-        <div class="signal-art" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
-        <p class="login-story-foot">Súkromný priestor pre teba a tvoju rodinu.</p>
-      </section>
-      <section class="login-card" aria-labelledby="loginHeading">
-        <p class="eyebrow">VSTUP DO APLIKÁCIE</p>
-        <h2 id="loginHeading">Vitaj späť</h2>
-        <p class="login-card-intro">Zadaj svoj prístupový kód a pokračuj v rozhovore.</p>
-        <form id="loginForm">
-          <label for="accessCode">Prístupový kód</label>
-          <input id="accessCode" type="password" autocomplete="current-password" required maxlength="512">
-          <button class="primary" type="submit">Otvoriť prekladač <span aria-hidden="true">↗</span></button>
-          <p id="loginStatus" role="status"></p>
-        </form>
-        <p class="login-privacy">Zvuk sa spracúva cez Soniox. Rozhovor sa uloží iba vtedy, keď to vyberieš.</p>
-      </section>
+  <div id="offlineBanner" class="banner banner-warn" role="status" hidden>Si offline. Preklad pokračuje po obnovení internetu.</div>
+
+  <main id="loginShell" class="login" hidden>
+    <div class="login-card">
+      <span class="logo" aria-hidden="true"><svg><use href="#i-wave"/></svg></span>
+      <h1>Prekladač</h1>
+      <p class="login-sub">Živý hlasový preklad pre rozhovor tvárou v tvár.</p>
+      <form id="loginForm" class="login-form">
+        <label for="accessCode" class="sr-only">Prístupový kód</label>
+        <input id="accessCode" type="password" autocomplete="current-password" placeholder="Prístupový kód" required maxlength="512">
+        <button class="btn btn-primary btn-block" type="submit">Pokračovať</button>
+        <p id="loginStatus" class="login-status" role="status"></p>
+      </form>
     </div>
   </main>
 
-  <main id="appShell" class="app-shell" hidden>
-    <header class="app-header">
-      <a href="/" class="brand" aria-label="Soniox prekladač – úvod">
-        <span class="brand-mark small-mark" aria-hidden="true"><svg viewBox="0 0 64 64" focusable="false"><path d="M10 22c7-8 15-8 22 0s15 8 22 0"/><path d="M10 42c7-8 15-8 22 0s15 8 22 0"/><circle cx="10" cy="22" r="3"/><circle cx="54" cy="42" r="3"/></svg></span>
-        <span>SONIOX <strong>PREKLADAČ</strong></span>
-      </a>
-      <div class="header-actions">
-        <span class="header-caption">SÚKROMNÝ HLASOVÝ PRIESTOR</span>
-        <button id="settingsBtn" class="secondary settings-trigger" type="button" aria-controls="settingsDialog">Nastavenia <span aria-hidden="true">⚙</span></button>
+  <div id="appShell" class="app" hidden>
+    <header class="topbar">
+      <div class="lang-pill" role="group" aria-label="Jazyky rozhovoru">
+        <button id="langABtn" class="lang-btn lang-me" type="button" aria-label="Môj jazyk"><span class="lang-code" id="langACode">SK</span><span class="lang-name" id="langAName">Slovenčina</span></button>
+        <button id="swapBtn" class="icon-btn swap-btn" type="button" aria-label="Vymeniť jazyky"><svg><use href="#i-swap"/></svg></button>
+        <button id="langBBtn" class="lang-btn lang-other" type="button" aria-label="Jazyk druhej osoby"><span class="lang-code" id="langBCode">DE</span><span class="lang-name" id="langBName">Nemčina</span></button>
       </div>
+      <button id="moreBtn" class="icon-btn" type="button" aria-label="Menu"><svg><use href="#i-more"/></svg></button>
     </header>
 
-    <div class="app-layout">
-      <aside class="setup-panel" aria-label="Príprava rozhovoru">
-        <div class="setup-heading">
-          <p class="eyebrow">01 / PRÍPRAVA</p>
-          <h2>Priprav rozhovor</h2>
-          <p>Vyber jazyky a spôsob, akým budete hovoriť.</p>
+    <p id="errorBanner" class="banner banner-error" role="alert" hidden><span id="errorText"></span><button id="errorClose" class="icon-btn icon-sm" type="button" aria-label="Zavrieť upozornenie"><svg><use href="#i-close"/></svg></button></p>
+
+    <section id="stage" class="stage" aria-label="Rozhovor">
+      <div id="feed" class="feed" aria-live="polite">
+        <div id="emptyState" class="empty">
+          <span class="empty-mark" aria-hidden="true"><svg><use href="#i-wave"/></svg></span>
+          <p class="empty-title" id="emptyTitle">Ťukni na mikrofón a hovor</p>
+          <p class="empty-sub" id="emptySub">Preklad sa zobrazí tu a prečíta nahlas.</p>
         </div>
-        <section class="language-panel" aria-label="Jazyky rozhovoru">
-          <div class="language-control">
-            <label for="langA"><span class="role-dot me"></span> Môj jazyk</label>
-            <input id="searchA" type="search" placeholder="Vyhľadať jazyk" aria-label="Vyhľadať môj jazyk">
-            <select id="langA"></select>
-          </div>
-          <button id="swapBtn" class="swap" type="button" aria-label="Vymeniť jazyky">⇄</button>
-          <div class="language-control">
-            <label for="langB"><span class="role-dot other"></span> Druhá osoba</label>
-            <input id="searchB" type="search" placeholder="Vyhľadať jazyk" aria-label="Vyhľadať druhý jazyk">
-            <select id="langB"></select>
-          </div>
-        </section>
-        <p id="catalogNote" class="catalog-note small muted"></p>
-        <section class="session-options" aria-label="Nastavenie rozhovoru">
-          <div><label for="profileId">Prostredie</label><select id="profileId"><option value="conversation">Bežný rozhovor</option><option value="office">Úrad</option><option value="interview">Pohovor</option><option value="doctor">Lekár</option><option value="hotel">Hotel</option><option value="administration">Administratíva</option><option value="cnc">CNC</option></select></div>
-          <div><label for="conversationMode">Ovládanie mikrofónu</label><select id="conversationMode"><option value="auto">AUTO · hovoriť po Štarte</option><option value="ptt">PTT · podržať tlačidlo</option></select></div>
-        </section>
-        <div class="setup-tip"><span class="setup-tip-mark" aria-hidden="true">i</span><p>Reproduktor je predvolený režim. Slúchadlá a hlasy nastavíš v Nastaveniach.</p></div>
-      </aside>
-
-      <div class="session-column">
-        <section class="heading">
-          <div><p class="eyebrow">02 / ŽIVÝ PREKLAD</p><h1>Rozhovor</h1><p id="activeLanguagePair" class="active-language-pair"></p></div>
-          <p>Hovor prirodzene. Pôvodnú reč aj preklad máš stále pred sebou.</p>
-        </section>
-        <section id="confirmLanguage" class="notice confirm-language" hidden>
-          <label for="detectedLanguage">Rozpoznaný jazyk druhej osoby</label>
-          <select id="detectedLanguage"></select>
-          <button id="confirmLanguageBtn" class="primary" type="button">Potvrdiť a prekladať obojsmerne</button>
-          <p class="small">Skontroluj jazyk. Potom môžeš hovoriť aj ty.</p>
-        </section>
-        <section class="toolbar" aria-label="Zobrazenie a zvuk">
-          <div class="display-options">
-            <label class="toggle"><input id="textOnly" type="checkbox"> Iba text</label>
-            <label class="toggle"><input id="faceMode" type="checkbox"> Oproti sebe</label>
-          </div>
-          <span id="modeLabel" class="pill">Reproduktor</span>
-        </section>
-        <section id="facePanel" class="face-panel" hidden aria-label="Zobrazenie pre oboch účastníkov">
-          <article class="face-other"><span id="faceOtherLabel"></span><p id="faceOther" dir="auto"></p></article>
-          <article><span id="faceMyLabel"></span><p id="faceMy" dir="auto"></p></article>
-        </section>
-        <section class="conversation" aria-label="Prepis rozhovoru">
-          <div class="feed-header"><div><span class="feed-kicker">PREPIS</span><strong id="conversationLabel">Aktuálny rozhovor</strong></div><button id="copyBtn" class="text-button" type="button">Kopírovať</button></div>
-          <div id="conversationFeed" class="conversation-feed"><p class="empty">Stačí stlačiť Počúvať.<br>Tu sa objaví pôvodná reč aj preklad.</p></div>
-        </section>
-        <p id="errorBanner" class="notice warning" role="alert" hidden></p>
-        <section class="controls" aria-label="Ovládanie rozhovoru">
-          <div class="control-state"><div class="live-status" role="status" aria-live="polite"><span id="statusDot" class="status-dot"></span><span id="status">Pripravený</span></div><p id="micHint" class="small muted">Mikrofón je vypnutý.</p></div>
-          <div class="control-buttons"><button id="startBtn" class="primary" type="button">Počúvať</button><button id="stopAudioBtn" class="secondary" type="button">Zastaviť hlas</button></div>
-          <div id="pttButtons" class="ptt-buttons" hidden><button id="pttA" class="primary" type="button" aria-label="Podrž hovorenie v mojom jazyku">Podrž · môj jazyk</button><button id="pttB" class="primary other-action" type="button" aria-label="Podrž hovorenie v jazyku druhej osoby">Podrž · druhá osoba</button></div>
-        </section>
-        <footer class="bottom-tools">
-          <button id="saveBtn" class="secondary" type="button">Uložiť rozhovor</button>
-          <button id="historyBtn" class="secondary" type="button">História</button>
-          <button id="newBtn" class="text-button" type="button">Nový rozhovor</button>
-        </footer>
-        <p class="privacy small muted">História sa ukladá iba na požiadanie v tomto zariadení. Audio sa trvalo neukladá.</p>
       </div>
-    </div>
-  </main>
+      <div id="facePanel" class="face" hidden>
+        <article class="face-half face-other"><span id="faceOtherLabel" class="face-label"></span><p id="faceOther" class="face-text" dir="auto"></p></article>
+        <article class="face-half face-me"><span id="faceMyLabel" class="face-label"></span><p id="faceMy" class="face-text" dir="auto"></p></article>
+      </div>
+    </section>
 
-  <dialog id="settingsDialog">
-    <div class="dialog-header"><div><p class="eyebrow">PREFERENCIE</p><h2>Nastavenia</h2></div><button class="close-dialog secondary" type="button" aria-label="Zavrieť nastavenia">✕</button></div>
-    <div class="dialog-body">
-      <section class="settings-section"><h3>Prehrávanie</h3><label for="outputMode">Zvukový výstup</label><select id="outputMode"><option value="speaker">Reproduktor</option><option value="headphones">Slúchadlá</option></select><p class="small muted">Slúchadlá vyber iba vtedy, keď cez ne skutočne počúvaš. Mikrofón pri nich zostáva zapnutý.</p></section>
-      <section class="settings-section"><h3>Hlasy prekladu</h3><p id="voiceCount" class="small muted"></p><p id="customVoiceStatus" class="small muted"></p>
-        <fieldset><legend>Hlas v mojom jazyku</legend><label for="voiceSearchA">Vyhľadať hlas</label><input id="voiceSearchA" type="search" placeholder="Meno, popis, štýl"><div class="voice-filter-grid"><div><label for="genderA">Typ</label><select id="genderA"><option value="">Všetky</option><option value="male">Mužské</option><option value="female">Ženské</option><option value="neutral">Neutrálne</option></select></div><div><label for="accentA">Prízvuk</label><select id="accentA"><option value="">Všetky</option></select></div><div><label for="ageA">Vek</label><select id="ageA"><option value="">Všetky</option></select></div><div><label for="styleA">Štýl</label><select id="styleA"><option value="">Všetky</option></select></div></div><label for="voiceA">Hlas</label><select id="voiceA"></select><p id="voiceMatchA" class="small muted"></p><button id="previewA" class="secondary" type="button">Vypočuť ukážku</button></fieldset>
-        <fieldset><legend>Hlas pre druhú osobu</legend><label for="voiceSearchB">Vyhľadať hlas</label><input id="voiceSearchB" type="search" placeholder="Meno, popis, štýl"><div class="voice-filter-grid"><div><label for="genderB">Typ</label><select id="genderB"><option value="">Všetky</option><option value="male">Mužské</option><option value="female">Ženské</option><option value="neutral">Neutrálne</option></select></div><div><label for="accentB">Prízvuk</label><select id="accentB"><option value="">Všetky</option></select></div><div><label for="ageB">Vek</label><select id="ageB"><option value="">Všetky</option></select></div><div><label for="styleB">Štýl</label><select id="styleB"><option value="">Všetky</option></select></div></div><label for="voiceB">Hlas</label><select id="voiceB"></select><p id="voiceMatchB" class="small muted"></p><button id="previewB" class="secondary" type="button">Vypočuť ukážku</button></fieldset>
-      </section>
-      <section class="settings-section"><h3>Súkromie a používanie</h3><p id="usageInfo" class="small muted"></p><p class="small muted">Rozhovory sa prenášajú na spracovanie do Sonioxu. Lokálna história nie je šifrovaný trezor ani synchronizácia medzi zariadeniami.</p><p class="small muted">Na mobile nechaj aplikáciu otvorenú. Prehliadač môže po zamknutí obrazovky pozastaviť mikrofón.</p></section>
-      <section id="accessPanel" class="settings-section" hidden><h3>Prístupy rodiny</h3><p class="small muted">Zrušenie prístupu okamžite ukončí aj aktívne relácie.</p><div id="accessUsers"></div></section>
-      <button id="logoutBtn" class="danger" type="button">Odhlásiť sa</button>
+    <section id="confirmLanguage" class="confirm" hidden aria-label="Potvrdenie jazyka">
+      <p class="confirm-title">Druhá osoba hovorí</p>
+      <div class="confirm-row">
+        <label for="detectedLanguage" class="sr-only">Rozpoznaný jazyk</label>
+        <select id="detectedLanguage" class="select"></select>
+        <button id="confirmLanguageBtn" class="btn btn-primary" type="button">Potvrdiť</button>
+      </div>
+    </section>
+
+    <footer class="dock">
+      <div class="dock-status"><span id="statusDot" class="dot"></span><span id="status" role="status" aria-live="polite">Pripravený</span><span id="modeLabel" class="dock-mode"></span></div>
+      <div id="resumeBar" class="resume" hidden><button id="resumeBtn" class="btn btn-primary btn-block" type="button">Pokračovať v rozhovore</button></div>
+      <div id="autoControls" class="dock-row">
+        <button id="faceBtn" class="icon-btn icon-lg" type="button" aria-pressed="false" aria-label="Zobrazenie oproti sebe"><svg><use href="#i-face"/></svg></button>
+        <button id="startBtn" class="mic" type="button" aria-label="Počúvať"><span class="mic-ring" aria-hidden="true"></span><svg class="mic-icon"><use href="#i-mic"/></svg><svg class="stop-icon"><use href="#i-stop"/></svg></button>
+        <button id="stopAudioBtn" class="icon-btn icon-lg" type="button" aria-label="Zastaviť hlas" disabled><svg><use href="#i-mute"/></svg></button>
+      </div>
+      <div id="pttControls" class="ptt" hidden>
+        <button id="pttA" class="ptt-btn ptt-me" type="button"><span class="ptt-hint">Podrž a hovor</span><span id="pttALabel" class="ptt-lang">Slovenčina</span></button>
+        <button id="pttB" class="ptt-btn ptt-other" type="button"><span class="ptt-hint">Podrž a hovor</span><span id="pttBLabel" class="ptt-lang">Nemčina</span></button>
+        <button id="pttEndBtn" class="btn btn-ghost btn-block" type="button">Ukončiť rozhovor</button>
+      </div>
+    </footer>
+  </div>
+
+  <dialog id="languageSheet" class="sheet" aria-labelledby="languageTitle">
+    <div class="sheet-head"><h2 id="languageTitle">Jazyk</h2><button class="icon-btn close-sheet" type="button" aria-label="Zavrieť"><svg><use href="#i-close"/></svg></button></div>
+    <div class="search"><svg><use href="#i-search"/></svg><input id="languageSearch" type="search" placeholder="Hľadať jazyk" aria-label="Hľadať jazyk" autocomplete="off"></div>
+    <div id="languageList" class="list" role="listbox" aria-labelledby="languageTitle"></div>
+  </dialog>
+
+  <dialog id="moreSheet" class="sheet" aria-labelledby="moreTitle">
+    <div class="sheet-head"><h2 id="moreTitle">Menu</h2><button class="icon-btn close-sheet" type="button" aria-label="Zavrieť"><svg><use href="#i-close"/></svg></button></div>
+    <div class="menu">
+      <button id="newBtn" class="menu-item" type="button">Nový rozhovor</button>
+      <button id="saveBtn" class="menu-item" type="button">Uložiť do zariadenia</button>
+      <button id="copyBtn" class="menu-item" type="button">Kopírovať text</button>
+      <button id="historyBtn" class="menu-item" type="button">Uložené rozhovory<svg><use href="#i-chevron"/></svg></button>
+      <button id="settingsBtn" class="menu-item" type="button">Nastavenia<svg><use href="#i-chevron"/></svg></button>
     </div>
+    <p class="sheet-note">Ukladá sa iba text, iba v tomto zariadení.</p>
   </dialog>
-  <dialog id="historyDialog">
-    <div class="dialog-header"><div><p class="eyebrow">TVOJE ZÁZNAMY</p><h2>Uložené rozhovory</h2></div><button class="close-dialog secondary" type="button" aria-label="Zavrieť históriu">✕</button></div>
-    <p class="small muted">Iba text v tomto zariadení pre aktuálneho používateľa.</p><div id="historyList"></div>
+
+  <dialog id="historySheet" class="sheet" aria-labelledby="historyTitle">
+    <div class="sheet-head"><h2 id="historyTitle">Uložené rozhovory</h2><button class="icon-btn close-sheet" type="button" aria-label="Zavrieť"><svg><use href="#i-close"/></svg></button></div>
+    <div id="historyList" class="list"></div>
   </dialog>
+
+  <dialog id="settingsSheet" class="sheet" aria-labelledby="settingsTitle">
+    <div class="sheet-head"><h2 id="settingsTitle">Nastavenia</h2><button class="icon-btn close-sheet" type="button" aria-label="Zavrieť"><svg><use href="#i-close"/></svg></button></div>
+    <section class="group">
+      <h3 class="group-title">Rozhovor</h3>
+      <div class="field"><span class="field-label" id="modeGroupLabel">Mikrofón</span>
+        <div class="segmented" role="radiogroup" aria-labelledby="modeGroupLabel" data-setting="conversationMode">
+          <button type="button" role="radio" data-value="auto">Automaticky</button><button type="button" role="radio" data-value="ptt">Podržať</button>
+        </div>
+      </div>
+      <div class="field"><span class="field-label" id="outputGroupLabel">Zvuk</span>
+        <div class="segmented" role="radiogroup" aria-labelledby="outputGroupLabel" data-setting="outputMode">
+          <button type="button" role="radio" data-value="speaker">Reproduktor</button><button type="button" role="radio" data-value="headphones">Slúchadlá</button><button type="button" role="radio" data-value="text">Iba text</button>
+        </div>
+      </div>
+      <div class="field"><span class="field-label" id="speedGroupLabel">Rýchlosť hlasu</span>
+        <div class="segmented" role="radiogroup" aria-labelledby="speedGroupLabel" data-setting="ttsSpeed">
+          <button type="button" role="radio" data-value="0.9">Pomalšie</button><button type="button" role="radio" data-value="1">Normálne</button><button type="button" role="radio" data-value="1.15">Rýchlejšie</button>
+        </div>
+      </div>
+      <div class="field"><label class="field-label" for="profileId">Prostredie</label>
+        <select id="profileId" class="select"><option value="conversation">Bežný rozhovor</option><option value="office">Úrad</option><option value="interview">Pohovor</option><option value="doctor">Lekár</option><option value="hotel">Hotel</option><option value="administration">Administratíva</option><option value="cnc">CNC a výroba</option></select>
+      </div>
+      <p class="hint" id="settingsLockHint" hidden>Mikrofón a prostredie zmeníš po zastavení rozhovoru.</p>
+    </section>
+    <section class="group">
+      <h3 class="group-title">Hlasy</h3>
+      <button id="voiceABtn" class="row-btn" type="button"><span class="row-main"><span class="row-label" id="voiceALabel">Môj jazyk</span><span class="row-value" id="voiceAValue">Adrian</span></span><svg><use href="#i-chevron"/></svg></button>
+      <button id="voiceBBtn" class="row-btn" type="button"><span class="row-main"><span class="row-label" id="voiceBLabel">Druhá osoba</span><span class="row-value" id="voiceBValue">Adrian</span></span><svg><use href="#i-chevron"/></svg></button>
+      <p id="customVoiceStatus" class="hint" hidden></p>
+    </section>
+    <section class="group">
+      <h3 class="group-title">Účet</h3>
+      <p id="usageInfo" class="hint"></p>
+      <div id="accessPanel" hidden><p class="hint">Zrušenie prístupu okamžite ukončí aj aktívne relácie.</p><div id="accessUsers" class="list"></div></div>
+      <button id="logoutBtn" class="btn btn-danger btn-block" type="button">Odhlásiť sa</button>
+      <p id="catalogNote" class="hint"></p>
+    </section>
+  </dialog>
+
+  <dialog id="voiceSheet" class="sheet" aria-labelledby="voiceTitle">
+    <div class="sheet-head"><h2 id="voiceTitle">Hlas</h2><button class="icon-btn close-sheet" type="button" aria-label="Zavrieť"><svg><use href="#i-close"/></svg></button></div>
+    <div class="search"><svg><use href="#i-search"/></svg><input id="voiceSearch" type="search" placeholder="Meno, štýl, prízvuk" aria-label="Hľadať hlas" autocomplete="off"></div>
+    <div class="chips" role="radiogroup" aria-label="Typ hlasu" id="voiceGender">
+      <button type="button" role="radio" data-value="" class="chip">Všetky</button><button type="button" role="radio" data-value="female" class="chip">Ženské</button><button type="button" role="radio" data-value="male" class="chip">Mužské</button>
+    </div>
+    <div id="voiceList" class="list" role="listbox" aria-labelledby="voiceTitle"></div>
+  </dialog>
+
   <div id="toast" class="toast" role="status" hidden></div>
   <script src="/history.js"></script>
   <script src="/app.js"></script>

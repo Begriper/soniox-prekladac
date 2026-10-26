@@ -128,3 +128,22 @@ test("a long pause mid-sentence closes the headphone TTS stream and later text s
   const texts = f.state.tts.flatMap(s => s.received).filter(m => m.text !== undefined).map(m => [m.text, m.text_end]);
   assert.deepEqual(texts, [["Hallo ", false], ["", true], ["Welt.", false], ["", true]]);
 });
+
+test("voice speed and the app user reach Soniox stream configs", async t => {
+  const f = await fixture(); t.after(() => f.close());
+  const cookie = await f.login(), ws = await f.connect(cookie, { language_a: "sk", language_b: "de", tts_speed: "1.15" });
+  await until(() => f.state.configs.length === 1);
+  assert.equal(f.state.configs[0].config.client_reference_id, "owner");
+  f.turn(f.state.stt[0]);
+  await until(() => ws.messages.some(m => m.type === "tts_stream_end"));
+  const streamConfig = f.state.tts.flatMap(s => s.received).find(m => m.model);
+  assert.equal(streamConfig.speed, 1.15);
+  assert.equal(streamConfig.client_reference_id, "owner");
+});
+
+test("out-of-range voice speed is rejected", async t => {
+  const f = await fixture(); t.after(() => f.close());
+  const cookie = await f.login(), ws = await f.connect(cookie, { language_a: "sk", language_b: "de", tts_speed: "3" });
+  await until(() => ws.readyState === WebSocket.CLOSED);
+  assert.equal(f.state.configs.length, 0);
+});

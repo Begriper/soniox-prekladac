@@ -22,7 +22,7 @@ class SonioxTtsWebSocket {
       firstAudioMs: options.firstAudioMs ?? 3000, idleAudioMs: options.idleAudioMs ?? 5000,
       totalMs: options.totalMs ?? 30000, onState: options.onState || (() => {}),
       // Soniox ends a stream that receives no text for a few seconds, so old prewarms are not reused.
-      prewarmMaxAgeMs: options.prewarmMaxAgeMs ?? 2000,
+      prewarmMaxAgeMs: options.prewarmMaxAgeMs ?? 2000, clientReferenceId: options.clientReferenceId || "",
       onMetric: options.onMetric || (() => {}),
       ws: null, connectPromise: null, streams: new Map(), epoch: 0, reconnects: 0,
     });
@@ -71,8 +71,9 @@ class SonioxTtsWebSocket {
     if (this.readyState !== this.WebSocketImpl.OPEN) throw new TtsWebSocketError("Connection unavailable");
     this.ws.send(JSON.stringify(payload));
   }
-  createStreamConfig({ streamId, language, voice }) {
-    return { stream_id: streamId, model: TTS_MODEL, language, voice, audio_format: TTS_AUDIO_FORMAT, sample_rate: TTS_SAMPLE_RATE };
+  createStreamConfig({ streamId, language, voice, speed = 1 }) {
+    return { stream_id: streamId, model: TTS_MODEL, language, voice, audio_format: TTS_AUDIO_FORMAT, sample_rate: TTS_SAMPLE_RATE,
+      ...(speed !== 1 ? { speed } : {}), ...(this.clientReferenceId ? { client_reference_id: this.clientReferenceId } : {}) };
   }
   retireStalePrewarms(now = Date.now()) {
     for (const s of [...this.streams.values()]) if (!s.active && now - s.createdAt > this.prewarmMaxAgeMs) this.fail(s, new TtsWebSocketError("Prewarm expired"));
@@ -83,9 +84,9 @@ class SonioxTtsWebSocket {
     if (epoch !== this.epoch) return;
     this.retireStalePrewarms();
     for (const config of configs.slice(0, 2)) {
-      if (this.streams.size >= 4 || [...this.streams.values()].some(s => s.language === config.language && s.voice === config.voice)) continue;
+      if (this.streams.size >= 4 || [...this.streams.values()].some(s => s.language === config.language && s.voice === config.voice && s.speed === (config.speed || 1))) continue;
       const streamId = createTtsStreamId("prewarm");
-      const stream = { streamId, ...config, active: false, audioStarted: false, createdAt: Date.now() };
+      const stream = { streamId, ...config, speed: config.speed || 1, active: false, audioStarted: false, createdAt: Date.now() };
       this.streams.set(streamId, stream);
       this.sendJson(this.createStreamConfig(stream));
     }
@@ -94,11 +95,11 @@ class SonioxTtsWebSocket {
     const epoch = this.epoch;
     await this.connect();
     if (epoch !== this.epoch || options.signal?.aborted) throw new TtsWebSocketError("Cancelled", { cancelled: true });
-    const language = options.language || "en", voice = options.voice || "Adrian";
+    const language = options.language || "en", voice = options.voice || "Adrian", speed = options.speed || 1;
     this.retireStalePrewarms();
-    let stream = [...this.streams.values()].find(s => !s.active && s.language === language && s.voice === voice);
+    let stream = [...this.streams.values()].find(s => !s.active && s.language === language && s.voice === voice && s.speed === speed);
     const isNew = !stream;
-    if (!stream) stream = { streamId: createTtsStreamId(), language, voice };
+    if (!stream) stream = { streamId: createTtsStreamId(), language, voice, speed };
     Object.assign(stream, { active: true, audioStarted: false, audioBytes: 0, audioChunks: 0, signal: options.signal, onAudio: options.onAudio || (() => {}) });
     this.streams.set(stream.streamId, stream);
     return new Promise((resolve, reject) => {

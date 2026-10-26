@@ -17,14 +17,14 @@ class SpeechSession {
     this.suppressed = new Set(); this.pending = new Map(); this.queue = []; this.playback = null; this.localPlayback = null;
     this.preparingJob = null; this.audioGeneration = 0; this.prewarmed = new Set(); this.sentItems = new Map();
     this.languageA = "sk"; this.languageB = "de"; this.outputMode = "speaker"; this.ttsEnabled = true;
-    this.voiceA = "Adrian"; this.voiceB = "Adrian"; this.stt = null; this.generation = 0;
+    this.voiceA = "Adrian"; this.voiceB = "Adrian"; this.ttsSpeed = 1; this.stt = null; this.generation = 0;
     this.profileId = "conversation"; this.conversationMode = "auto"; this.pttActive = false; this.lastFinalizeAt = 0;
     this.acceptAudio = false; this.finishing = false; this.sttFinished = false;
     this.lastActivity = Date.now(); this.startedAt = Date.now(); this.candidate = null;
     this.sessionAudio = 0; this.sessionTtsBytes = 0; this.sessionTtsRequests = 0;
     this.ttsFailures = 0; this.restUntil = 0; this.audioStates = new Map(); this.endpointTimes = new Map();
     this.timings = []; this.timerSet = new Set(); this.isAlive = true; this.frameCount = 0;
-    this.synthesis = new SonioxTtsWebSocket({ url: this.urls.ttsWs, apiKey: this.apiKey });
+    this.synthesis = new SonioxTtsWebSocket({ url: this.urls.ttsWs, apiKey: this.apiKey, clientReferenceId: this.auth.username });
     this.configTimer = this.later(() => this.end("Konfigurácia neprišla včas."), 12000);
     this.expiryTimer = this.later(() => this.end("Prihlásenie vypršalo.", "auth_expired"), Math.max(1, this.auth.expiresAt - Date.now()));
     this.limitTimer = this.later(() => this.stop(), this.limits.sessionMs);
@@ -107,6 +107,7 @@ class SpeechSession {
       this.languageA = msg.language_a || "sk"; this.languageB = msg.language_b || "de";
       if (this.languageA === this.languageB) { this.end("Vyber dva rôzne jazyky."); return; }
       this.voiceA = msg.voice_a || msg.tts_voice || "Adrian"; this.voiceB = msg.voice_b || msg.tts_voice || "Adrian";
+      this.ttsSpeed = msg.tts_speed !== undefined ? Number(msg.tts_speed) : 1;
       this.ttsEnabled = msg.tts_enabled !== false; this.outputMode = msg.output_mode || "speaker";
       this.profileId = msg.profile_id || "conversation"; this.conversationMode = msg.conversation_mode || "auto";
       this.startStt(); return;
@@ -150,6 +151,7 @@ class SpeechSession {
     if (msg.type === "update_settings") {
       if (!this.validSettings(msg)) { this.send({ type: "error", message: "Hlas nie je dostupný." }); return; }
       this.voiceA = msg.voice_a || this.voiceA; this.voiceB = msg.voice_b || this.voiceB;
+      if (msg.tts_speed !== undefined) this.ttsSpeed = Number(msg.tts_speed);
       this.outputMode = msg.output_mode || this.outputMode; this.ttsEnabled = msg.tts_enabled ?? this.ttsEnabled;
       if (!this.ttsEnabled) this.cancelAudio(); this.state(); return;
     }
@@ -184,7 +186,7 @@ class SpeechSession {
       if (!current()) { socket.close(); return; } clearTimeout(timer);
       const auto = this.languageB === "auto";
       socket.send(JSON.stringify({
-        model: STT_MODEL, audio_format: "pcm_s16le", sample_rate: 16000, num_channels: 1,
+        model: STT_MODEL, audio_format: "pcm_s16le", sample_rate: 16000, num_channels: 1, client_reference_id: this.auth.username,
         ...(!auto ? { language_hints: [this.languageA, this.languageB] } : {}),
         enable_language_identification: true, enable_endpoint_detection: true,
         max_endpoint_delay_ms: this.endpoint.delay, endpoint_sensitivity: this.endpoint.sensitivity,
@@ -253,7 +255,7 @@ class SpeechSession {
     if (this.prewarmed.has(item.id) || this.pending.has(item.id) || !this.catalog.canSpeak(language)) return;
     this.prewarmed.add(item.id);
     if (this.prewarmed.size > 200) this.prewarmed.delete(this.prewarmed.values().next().value);
-    void this.synthesis.prewarm([{ language, voice: language === this.languageA ? this.voiceA : this.voiceB }]).catch(() => {});
+    void this.synthesis.prewarm([{ language, voice: language === this.languageA ? this.voiceA : this.voiceB, speed: this.ttsSpeed }]).catch(() => {});
   }
   appendTtsPart(itemId, language, text) {
     if (!this.catalog.canSpeak(language, text)) {
@@ -262,7 +264,7 @@ class SpeechSession {
     }
     let job = this.pending.get(itemId);
     if (!job) {
-      job = { text: "", parts: [], waiters: new Set(), ended: false, queued: false, language, itemId, voice: language === this.languageA ? this.voiceA : this.voiceB };
+      job = { text: "", parts: [], waiters: new Set(), ended: false, queued: false, language, itemId, voice: language === this.languageA ? this.voiceA : this.voiceB, speed: this.ttsSpeed };
       this.pending.set(itemId, job);
     }
     if (job.text.length + text.length > 5000) {
@@ -301,7 +303,7 @@ class SpeechSession {
       this.updateItems(); return;
     }
     for (const chunk of chunks) {
-      const job = { text: chunk, parts: [chunk], waiters: new Set(), ended: true, queued: false, language, itemId, voice: language === this.languageA ? this.voiceA : this.voiceB };
+      const job = { text: chunk, parts: [chunk], waiters: new Set(), ended: true, queued: false, language, itemId, voice: language === this.languageA ? this.voiceA : this.voiceB, speed: this.ttsSpeed };
       this.queueJob(job);
     }
   }
