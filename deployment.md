@@ -1,3 +1,21 @@
+# Verzia 3.5.0 — release 53, 2026-10-26
+
+Na výslovné schválenie používateľa zlúčený PR #14 a nasadený `main` (merge commit `faa768f`): režim Počúvanie (prepínač Konverzácia | Počúvanie, zdroj zvolený alebo Auto, jednosmerný preklad do jazyka A, samostatné prepínače Titulky a Hlas, plný duplex, plynulé pokračovanie po 30-min limite, nečinnosť 5 min). Fly remote builder, iba existujúca Machine `8e2135b77993d8` vo `fra`; volume `vol_rnzld90dqg7mypkr` zostal pripojený, secrets sa nemenili.
+
+- Snapshot volume pred deployom: `vs_QJ4KaVNKAenhBKk9G7Ob5` (retencia 5 dní).
+- Aktuálny image: `registry.fly.io/soniox-prekladac:deployment-01M5WRZGX0GBDF5Y00ZMQW31ZR`
+- Predchádzajúci image na rollback: `registry.fly.io/soniox-prekladac:deployment-01M5WQ68XXD5YNZV46K0DZX12V` (v52)
+- Pred deployom: CI (Node 24) zelené, lokálne `npm run check` a 164/164 testov (Node 22.14), Codex revízia opravená, overenie v prehliadači na mock serveri pri 360 px.
+- Po deployi: release v53, health check `1 passing`, log `Translator 3.5.0 listening on 8080`; `/api/config` 3.5.0; cache `translator-shell-3.5.0`; HTML má prepínač Počúvanie, Titulky, Hlas, tlačidlo passkey a podpis autora; `?v=3.5.0` súbory 200; `/api/session` a `/api/passkeys` 401, `/api/admin/users` 403; POST `/api/login` s cudzím Origin 403; WebSocket bez cookie 401.
+- Neoverené: skutočné Počúvanie na telefóne (slúchadlá, reproduktor, výstup pri zapnutom mikrofóne) a dlhšie počúvanie cez 30 min. Overí používateľ.
+- Rollback na v52 je bezpečný: server nemá nové tabuľky, stará verzia ignoruje `mode` a `listen_source`.
+
+```powershell
+fly deploy --app soniox-prekladac --image registry.fly.io/soniox-prekladac:deployment-01M5WQ68XXD5YNZV46K0DZX12V --only-machines 8e2135b77993d8 --update-only --strategy immediate --yes
+```
+
+---
+
 # Verzia 3.4.0 — release 52, 2026-10-26
 
 Na výslovné schválenie používateľa zlúčený PR #13 a nasadený `main` (merge commit `341a745`): prihlásenie odtlačkom prsta, tvárou alebo Face ID (passkey, WebAuthn) a podpis „Vytvoril František Stolár“ na úvodnej obrazovke. Fly remote builder, iba existujúca Machine `8e2135b77993d8` vo `fra`; volume `vol_rnzld90dqg7mypkr` zostal pripojený, secrets sa nemenili.
