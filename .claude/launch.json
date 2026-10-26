@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mock-app",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/mock-app.cjs"],
+      "port": 3210,
+      "url": "http://127.0.0.1:3210"
+    }
+  ]
+}
