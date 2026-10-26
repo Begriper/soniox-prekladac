@@ -41,7 +41,7 @@ test("release versions, HTML, worklet, manifest and cached shell URLs agree", ()
 function worker(fetchImpl) {
   const origin = "https://unit.test";
   const handlers = {}, stores = new Map(), calls = [];
-  let skipped = false, claimed = false;
+  let skipped = false, claimed = false, quotaFull = false;
   const key = request => new URL(typeof request === "string" ? request : request.url, origin).href;
   const fetch = async request => { calls.push(key(request)); return fetchImpl(request); };
   const caches = {
@@ -50,7 +50,7 @@ function worker(fetchImpl) {
       const store = stores.get(name);
       return {
         async match(request) { return store.get(key(request))?.clone(); },
-        async put(request, response) { store.set(key(request), response.clone()); },
+        async put(request, response) { if (quotaFull) throw new Error("QuotaExceededError"); store.set(key(request), response.clone()); },
         async addAll(urls) {
           const entries = await Promise.all(urls.map(async url => {
             const response = await fetch(url);
@@ -77,18 +77,20 @@ function worker(fetchImpl) {
     caches, calls, stores,
     get skipped() { return skipped; },
     get claimed() { return claimed; },
+    set quotaFull(value) { quotaFull = value; },
     async lifecycle(type) {
       const pending = [];
       handlers[type]({ waitUntil(promise) { pending.push(promise); } });
       await Promise.all(pending);
     },
     request(url, options = {}) {
-      let response;
+      let response; const pending = [];
       handlers.fetch({
         request: { url: new URL(url, origin).href, method: "GET", mode: "cors", ...options },
-        respondWith(promise) { response = promise; }
+        respondWith(promise) { response = promise; },
+        waitUntil(promise) { pending.push(promise); }
       });
-      return response;
+      return response && response.then(async result => { await Promise.all(pending); return result; });
     }
   };
 }
@@ -179,4 +181,13 @@ test("Express serves versioned shell URLs and revalidates HTML and the service w
     assert.deepEqual(Buffer.from(await response.arrayBuffer()), expected, url);
   }
   assert.equal((await (await f.request("/api/config")).json()).appVersion, version);
+});
+
+test("a failed cache write still delivers the successful network response", async () => {
+  const w = worker(async () => new Response("network"));
+  await w.lifecycle("install");
+  w.stores.get(CACHE).delete("https://unit.test/app.js?v=" + version);
+  w.quotaFull = true;
+  assert.equal(await (await w.request("/app.js?v=" + version)).text(), "network");
+  assert.equal(await (await w.request("/", { mode: "navigate" })).text(), "network");
 });

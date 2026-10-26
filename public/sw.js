@@ -24,23 +24,23 @@ self.addEventListener('fetch', event => {
   const navigation = event.request.mode === 'navigate' && (url.pathname === '/' || url.pathname === '/index.html');
   // Only public application assets. Never cache /api, text history or audio.
   if (!navigation && (!SHELL.includes(url.pathname + url.search) || url.pathname === '/' || url.pathname === '/index.html')) return;
+  // A failed cache write (for example a full storage quota) must never discard a good network response.
+  const store = (cache, key, response) => event.waitUntil(cache.put(key, response).catch(() => {}));
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
     if (navigation) {
-      try {
-        const response = await fetch(event.request);
-        if (!response.ok) return await cache.match('/index.html') || response;
-        await cache.put('/index.html', response.clone());
-        return response;
-      } catch {
-        return await cache.match('/index.html') || Response.error();
-      }
+      let response;
+      try { response = await fetch(event.request); }
+      catch { return await cache.match('/index.html') || Response.error(); }
+      if (!response.ok) return await cache.match('/index.html') || response;
+      store(cache, '/index.html', response.clone());
+      return response;
     }
     // Exact versioned URLs are immutable; never fall back to another cache or URL.
     const cached = await cache.match(event.request);
     if (cached) return cached;
     const response = await fetch(event.request);
-    if (response.ok) await cache.put(event.request, response.clone());
+    if (response.ok) store(cache, event.request, response.clone());
     return response;
   })());
 });
