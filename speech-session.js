@@ -15,7 +15,7 @@ class SpeechSession {
     this.client = client; this.id = randomUUID(); this.closed = false; this.configured = false;
     this.timeline = createConversationTimelineState({ maxItems: 1000 });
     this.suppressed = new Set(); this.pending = new Map(); this.queue = []; this.playback = null; this.localPlayback = null;
-    this.preparingJob = null; this.audioGeneration = 0; this.prewarmed = new Set();
+    this.preparingJob = null; this.audioGeneration = 0; this.prewarmed = new Set(); this.sentItems = new Map();
     this.languageA = "sk"; this.languageB = "de"; this.outputMode = "speaker"; this.ttsEnabled = true;
     this.voiceA = "Adrian"; this.voiceB = "Adrian"; this.stt = null; this.generation = 0;
     this.profileId = "conversation"; this.conversationMode = "auto"; this.pttActive = false; this.lastFinalizeAt = 0;
@@ -79,9 +79,18 @@ class SpeechSession {
     }
     return { latency, duration_ms: Date.now() - this.startedAt, audio_bytes: this.sessionAudio, tts_requests: this.sessionTtsRequests, tts_audio_bytes: this.sessionTtsBytes, timings: this.timings.slice(-100), rest_until: this.restUntil };
   }
-  updateItems() {
-    const items = serializeConversationItems(this.timeline).map(i => ({ ...i, audio_status: this.audioStates.get(i.id) || (this.ttsEnabled ? "pending" : "text_only") }));
-    this.send({ type: "token", conversation_items: items, language_a: this.languageA, language_b: this.languageB });
+  // Sends only items that changed since the last update; long conversations would otherwise
+  // resend the whole transcript several times a second over mobile data.
+  updateItems(reset = false) {
+    if (reset) this.sentItems.clear();
+    const changed = [];
+    for (const i of serializeConversationItems(this.timeline)) {
+      const item = { ...i, audio_status: this.audioStates.get(i.id) || (this.ttsEnabled ? "pending" : "text_only") };
+      const key = JSON.stringify(item);
+      if (this.sentItems.get(item.id) !== key) { this.sentItems.set(item.id, key); changed.push(item); }
+    }
+    if (!changed.length && !reset) return;
+    this.send({ type: "token", conversation_items: changed, reset, language_a: this.languageA, language_b: this.languageB });
   }
   validSettings(msg) {
     if (msg.language_a !== undefined && !this.catalog.hasLanguage(msg.language_a)) return false;
@@ -145,7 +154,7 @@ class SpeechSession {
       if (!this.ttsEnabled) this.cancelAudio(); this.state(); return;
     }
     if (msg.type === "clear_text") {
-      this.cancelAudio(); this.timeline.items = []; this.timeline.currentItemId = null; this.updateItems(); return;
+      this.cancelAudio(); this.timeline.items = []; this.timeline.currentItemId = null; this.updateItems(true); return;
     }
     if (msg.type === "replay_translation") {
       const item = this.timeline.items.find(i => i.id === msg.item_id);

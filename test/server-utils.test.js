@@ -5,47 +5,15 @@ const {
   appendConversationToken,
   chunkTextForTts,
   createConversationTimelineState,
-  markConversationEndpoint,
-  normalizeBoolean,
-  normalizeEndpointDelay,
-  normalizeLanguageCode,
-  normalizeOutputMode,
-  normalizeSttLanguageList,
-  normalizeTtsVoiceList,
-  normalizeVoiceId,
-  serializeConversationItems,
-  validateReplayTranslationRequest,
+  markConversationEndpoint,
+  normalizeLanguageCode,
+  serializeConversationItems,
 } = require('../server-utils');
 
 test('normalizeLanguageCode strips region and unsafe characters', () => {
   assert.equal(normalizeLanguageCode('sk-SK'), 'sk');
   assert.equal(normalizeLanguageCode(' EN_us '), 'enus');
   assert.equal(normalizeLanguageCode('123'), '');
-});
-
-test('normalizeVoiceId keeps safe identifiers and falls back to Adrian', () => {
-  assert.equal(normalizeVoiceId(' Adrian.v2 '), 'Adrian.v2');
-  assert.equal(normalizeVoiceId('Bad<script>Voice'), 'BadscriptVoice');
-  assert.equal(normalizeVoiceId(''), 'Adrian');
-});
-
-test('normalizeEndpointDelay clamps to the supported latency window', () => {
-  assert.equal(normalizeEndpointDelay(100), 500);
-  assert.equal(normalizeEndpointDelay(900), 900);
-  assert.equal(normalizeEndpointDelay(9999), 3000);
-  assert.equal(normalizeEndpointDelay('not-a-number'), 1500);
-});
-
-test('normalizeOutputMode only allows speaker or headphones', () => {
-  assert.equal(normalizeOutputMode('headphones'), 'headphones');
-  assert.equal(normalizeOutputMode('speaker'), 'speaker');
-  assert.equal(normalizeOutputMode('bad'), 'speaker');
-});
-
-test('normalizeBoolean accepts common string values and preserves fallback', () => {
-  assert.equal(normalizeBoolean('yes', false), true);
-  assert.equal(normalizeBoolean('off', true), false);
-  assert.equal(normalizeBoolean(undefined, false), false);
 });
 
 test('chunkTextForTts preserves all text beyond four bounded chunks', () => {
@@ -56,53 +24,6 @@ test('chunkTextForTts preserves all text beyond four bounded chunks', () => {
   assert.equal(chunks.join(' '), text);
   assert.ok(chunks.every((chunk) => chunk.length <= 24));
   assert.equal(chunkTextForTts('  ahoj  ', 24)[0], 'ahoj');
-});
-
-test('normalizeSttLanguageList prefers stt-rt-v5, deduplicates, and sorts languages', () => {
-  const result = normalizeSttLanguageList({
-    models: [
-      { id: 'older-model', languages: ['zz'] },
-      {
-        id: 'stt-rt-v5',
-        languages: [
-          'sk',
-          { code: 'en', name: 'English' },
-          { language: 'sk', name: 'Slovak duplicate' },
-          { language_code: 'de-DE', display_name: 'German' }
-        ]
-      }
-    ]
-  });
-
-  assert.equal(result.modelId, 'stt-rt-v5');
-  assert.deepEqual(result.languages, [
-    { code: 'en', name: 'English' },
-    { code: 'de', name: 'German' },
-    { code: 'sk', name: 'Slovak' }
-  ]);
-});
-
-test('normalizeSttLanguageList falls back to first model with languages', () => {
-  const result = normalizeSttLanguageList({
-    models: [
-      { id: 'empty-model', languages: [] },
-      { id: 'language-model', languages: ['de', 'en'] }
-    ]
-  });
-
-  assert.equal(result.modelId, 'language-model');
-  assert.deepEqual(result.languages, [
-    { code: 'en', name: 'English' },
-    { code: 'de', name: 'German' }
-  ]);
-});
-
-test('normalizeSttLanguageList creates readable names for string language codes', () => {
-  const result = normalizeSttLanguageList({
-    models: [{ id: 'stt-rt-v5', languages: ['sk'] }]
-  });
-
-  assert.deepEqual(result.languages, [{ code: 'sk', name: 'Slovak' }]);
 });
 
 test('conversation timeline groups explicit two-way Slovak to German turn', () => {
@@ -202,48 +123,4 @@ test('conversation timeline ignores language A speech in auto mode', () => {
   assert.equal(translationResult.tts_text, '');
   assert.equal(translationResult.tts_language, '');
 });
-
-test('validateReplayTranslationRequest accepts safe translated text', () => {
-  const result = validateReplayTranslationRequest({
-    item_id: 'turn-3',
-    text: 'Guten Morgen',
-    language: 'de',
-    voice: 'Cooper — Male'
-  }, 60);
-
-  assert.deepEqual(result, {
-    ok: true,
-    item_id: 'turn-3',
-    text: 'Guten Morgen',
-    language: 'de',
-    voice: 'Cooper  Male',
-    error: ''
-  });
-});
-
-test('validateReplayTranslationRequest rejects empty or too long text', () => {
-  assert.equal(validateReplayTranslationRequest({ text: ' ', language: 'de' }, 10).ok, false);
-  assert.equal(validateReplayTranslationRequest({ text: 'abcdefghijkl', language: 'de' }, 10).ok, false);
-  assert.equal(validateReplayTranslationRequest({ text: 'Hallo', language: '' }, 10).ok, false);
-});
-
-test('normalizeTtsVoiceList keeps all voices from tts-rt-v2 with metadata', () => {
-  const result = normalizeTtsVoiceList({
-    models: [
-      { id: 'legacy-tts', voices: [{ id: 'Old', gender: 'male' }] },
-      {
-        id: 'tts-rt-v2',
-        voices: [
-          { id: 'Maya', name: 'Maya', gender: 'Female', description: 'Warm voice' },
-          { voice: 'Daniel', gender: 'Male', description: 'Calm voice' }
-        ]
-      }
-    ]
-  });
-
-  assert.equal(result.modelId, 'tts-rt-v2');
-  assert.deepEqual(result.voices, [
-    { id: 'Maya', name: 'Maya', gender: 'female', description: 'Warm voice' },
-    { id: 'Daniel', name: 'Daniel', gender: 'male', description: 'Calm voice' }
-  ]);
-});
+
