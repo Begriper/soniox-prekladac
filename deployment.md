@@ -1,3 +1,19 @@
+# Verzia 3.2.0 — release 50, 2026-10-26
+
+Na výslovné schválenie používateľa nasadený `main` po zlúčení PR #3 (merge commit `eda0759`, obsahuje aj PR #2): Soniox autentifikácia v hlavičke, PTT keepalive, TTS lifecycle, rozdielový prepis, auto-reconnect, nové mobilné UI a HTTP health check. Fly remote builder, iba existujúca Machine `8e2135b77993d8` vo `fra`; volume `vol_rnzld90dqg7mypkr` zostal pripojený, secrets sa nemenili.
+
+- Aktuálny image: `registry.fly.io/soniox-prekladac:deployment-01M5W97PS3G8X2KNEHZ6G7VT31`
+- Predchádzajúci image na rollback: `registry.fly.io/soniox-prekladac:deployment-01M5W2WR0W5BMNNDMWGNHJYCTW` (v49)
+- Pred deployom: GitHub Actions CI (Node 24) zelené, lokálne `npm run check` a 56/56 testov, `fly config validate`.
+- Po deployi: release v50 `complete`, Machine `started`, health check `1 passing` (jedno zlyhanie počas štartu pred `Translator 3.2.0 listening on 8080`). `/health`, `/`, statické súbory, PNG ikony a font HTTP 200; nové UI v HTML; `/api/config` 3.2.0; neprihlásené API 401; POST `/api/login` s cudzím Origin 403.
+- Neoverené: skutočný Soniox s autentifikáciou v hlavičke (lokálne iba mock) a fyzické telefóny. Ak preklad nefunguje, okamžite rollback na v49.
+
+```powershell
+fly deploy --app soniox-prekladac --image registry.fly.io/soniox-prekladac:deployment-01M5W2WR0W5BMNNDMWGNHJYCTW --only-machines 8e2135b77993d8 --update-only --strategy immediate --yes
+```
+
+---
+
 # Bezpečnostná oprava závislostí — release 49, 2026-10-26
 
 Na výslovné schválenie používateľa nasadená vetva `fix/npm-audit-2026-10` (commit `2fa32ed`): `body-parser` 1.20.9 (GHSA-27r3-jxmh-p828) a `proxy-addr` 2.0.8 (GHSA-jqcg-44mw-7w3h), zmena iba v `package-lock.json`. Fly remote builder, iba existujúca Machine `8e2135b77993d8` vo `fra`; volume `vol_rnzld90dqg7mypkr` zostal pripojený, secrets sa nemenili.
