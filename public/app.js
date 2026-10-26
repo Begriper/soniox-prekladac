@@ -79,7 +79,7 @@ function controls() {
   $("status").textContent = STATE_LABELS[state] || STATE_LABELS.idle;
   $("modeLabel").textContent = listen ? listenVoice ? "Hlas · výstup telefónu" : "Iba titulky" : (ttsEnabled() ? outputMode() === "speaker" ? "Reproduktor" : "Slúchadlá" : "Iba text") + (ptt ? " · Podržať" : "");
   $("langACode").textContent = shortCode(chosenA); $("langAName").textContent = capitalize(name(chosenA));
-  $("langBCode").textContent = shortCode(listen ? listenSource : chosenB); $("langBName").textContent = listen ? (listenSource === "auto" ? "Automaticky" : capitalize(name(listenSource))) + " ▾" : capitalize(name(chosenB));
+  $("langBCode").textContent = shortCode(listen ? listenSource : chosenB); $("langBName").textContent = listen ? (listenSource === "auto" ? "Auto" : capitalize(name(listenSource))) + " ▾" : capitalize(name(chosenB));
   $("langBBtn").setAttribute("aria-label", listen ? "Jazyk, ktorý počúvam" : "Jazyk druhej osoby");
   $("swapBtn").hidden = listen; $("listenArrow").hidden = !listen;
   for (const id of ["langABtn", "langBBtn"]) $(id).disabled = running || stopping;
@@ -962,12 +962,15 @@ $("sessionMode").addEventListener("click", event => {
   saveSettings(); renderAll(); controls();
 });
 for (const id of ["listenSubtitles", "listenVoice"]) $(id).addEventListener("change", () => {
+  const subtitlesWereHidden = !listenSubtitles;
   listenSubtitles = $("listenSubtitles").checked; listenVoice = $("listenVoice").checked;
   if (!listenSubtitles && !listenVoice) {
     if (id === "listenSubtitles") listenVoice = true; else listenSubtitles = true;
     toast(id === "listenSubtitles" ? "Hlas zostáva zapnutý." : "Titulky zostávajú zapnuté.");
   }
   saveSettings(); controls(); render(entries);
+  // A feed that was hidden starts at the top; jump to the latest translation when subtitles come back.
+  if (subtitlesWereHidden && listenSubtitles) $("feed").scrollTop = $("feed").scrollHeight;
   send({ type: "update_settings", tts_enabled: listenVoice });
   if (!listenVoice) stopSound();
 });
