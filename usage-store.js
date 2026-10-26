@@ -2,7 +2,15 @@
 const { DatabaseSync } = require("node:sqlite");
 const fs = require("node:fs");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
 const FIELDS = ["sessions", "audioBytes", "ttsRequests", "ttsAudioBytes", "ttsChars", "sttSeconds", "previewTtsRequests"];
+const TOTALS = ["sttSeconds", "ttsChars", "ttsRequests", "ttsAudioBytes", "sessions"];
+const emptyTotals = () => Object.fromEntries(TOTALS.map(key => [key, 0]));
+const median = values => {
+  values.sort((a, b) => a - b);
+  const i = Math.floor(values.length / 2);
+  return values.length ? Math.round(values.length % 2 ? values[i] : (values[i - 1] + values[i]) / 2) : null;
+};
 
 // Reservations are committed before contacting the provider. Failed requests remain
 // reserved: the provider may already have billed them. No transcript/audio is stored.
@@ -17,6 +25,8 @@ class UsageStore {
       CREATE INDEX IF NOT EXISTS auth_sessions_username ON auth_sessions(username);
       CREATE INDEX IF NOT EXISTS auth_sessions_expiry ON auth_sessions(expires_at);
       CREATE TABLE IF NOT EXISTS audit_log (at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT, detail_json TEXT);`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS conversation_log (id TEXT PRIMARY KEY, username TEXT NOT NULL, started_at TEXT NOT NULL, duration_ms INTEGER, stt_seconds REAL, tts_chars INTEGER, tts_requests INTEGER, tts_audio_bytes INTEGER, language_a TEXT, language_b TEXT, profile TEXT, latency_median_ms INTEGER, end_code TEXT);
+      CREATE INDEX IF NOT EXISTS conversation_log_started ON conversation_log(started_at);`);
     this.statements = new Map();
     if (this.listUsers().length) this.migrateRevokedUsers();
   }
@@ -56,25 +66,86 @@ class UsageStore {
   limitsJson(limits) {
     if (limits == null) return null;
     if (typeof limits !== "object" || Array.isArray(limits)) throw new Error("Invalid limits");
-    for (const [key, value] of Object.entries(limits)) if (![...FIELDS, "sttSecondsMonth"].includes(key) || !Number.isFinite(value) || value < 0) throw new Error("Invalid limits");
+    for (const [key, value] of Object.entries(limits)) if (![...FIELDS.filter(f => f !== "previewTtsRequests"), "sttSecondsMonth"].includes(key) || !Number.isFinite(value) || value < 0 || value > 1e12) throw new Error("Invalid limits");
     return JSON.stringify(limits);
   }
   limitsFor(username) { return { ...this.limits, ...JSON.parse(this.getUser(username)?.limits_json || "{}") }; }
   setPasswordHash(username, hash) { return this.statement("UPDATE users SET password_hash=? WHERE username=?").run(hash, username).changes > 0; }
   setDisabled(username, disabled) {
     const at = new Date().toISOString();
-    this.db.exec("BEGIN IMMEDIATE");
+    // A savepoint also works inside the admin API's audit transaction.
+    this.db.exec("SAVEPOINT set_disabled");
     try {
       // Keep an enabled administrator even when this method is used outside HTTP routes.
       const changed = this.statement("UPDATE users SET disabled_at=? WHERE username=? AND (?=0 OR role!='admin' OR disabled_at IS NOT NULL OR (SELECT COUNT(*) FROM users WHERE role='admin' AND disabled_at IS NULL)>1)").run(disabled ? at : null, username, Number(disabled)).changes > 0;
       // Mirrored into the v3.2 table so a rollback on the same volume still refuses the blocked code.
       if (changed && disabled) this.statement("INSERT INTO revoked_users(user,revoked_at) VALUES(?,?) ON CONFLICT(user) DO NOTHING").run(username, at);
       if (changed && !disabled) this.statement("DELETE FROM revoked_users WHERE user=?").run(username);
-      this.db.exec("COMMIT");
+      this.db.exec("RELEASE set_disabled");
       return changed;
-    } catch (err) { try { this.db.exec("ROLLBACK"); } catch {} throw err; }
+    } catch (err) { try { this.db.exec("ROLLBACK TO set_disabled; RELEASE set_disabled"); } catch {} throw err; }
   }
   setLimits(username, limits) { return this.statement("UPDATE users SET limits_json=? WHERE username=?").run(this.limitsJson(limits), username).changes > 0; }
+  setRole(username, role) {
+    return this.statement("UPDATE users SET role=? WHERE username=? AND (?='admin' OR role!='admin' OR disabled_at IS NOT NULL OR (SELECT COUNT(*) FROM users WHERE role='admin' AND disabled_at IS NULL)>1)").run(role, username, role).changes > 0;
+  }
+  deleteUser(username) {
+    const user = this.getUser(username);
+    if (!user || (user.role === "admin" && !user.disabled_at && this.countAdmins() <= 1)) return false;
+    const anonymous = "deleted-" + createHash("sha256").update(username + user.created_at).digest("hex").slice(0, 8);
+    // Merge even an unlikely anonymous-id collision so historical totals survive.
+    for (const row of this.statement("SELECT day,data FROM usage WHERE user=?").all(username)) {
+      const data = JSON.parse(row.data), previous = this.read(anonymous, row.day);
+      for (const key of FIELDS) previous[key] += data[key] || 0;
+      this.statement("INSERT INTO usage(user,day,data) VALUES(?,?,?) ON CONFLICT(user,day) DO UPDATE SET data=excluded.data").run(anonymous, row.day, JSON.stringify(previous));
+    }
+    this.statement("DELETE FROM usage WHERE user=?").run(username);
+    this.statement("UPDATE conversation_log SET username=? WHERE username=?").run(anonymous, username);
+    this.deleteUserSessions(username);
+    // A leftover legacy revocation would block a future account of the same name on the next start.
+    this.statement("DELETE FROM revoked_users WHERE user=?").run(username);
+    this.statement("DELETE FROM users WHERE username=?").run(username);
+    return true;
+  }
+  userSessions(username) { return this.statement("SELECT created_at,last_seen_at,device FROM auth_sessions WHERE username=? AND expires_at>? ORDER BY created_at DESC").all(username, Date.now()); }
+  recordConversation(username, summary) {
+    this.statement("INSERT INTO conversation_log VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)").run(summary.id, username, summary.started_at, summary.duration_ms, summary.stt_seconds, summary.tts_chars, summary.tts_requests, summary.tts_audio_bytes, summary.language_a, summary.language_b, summary.profile, summary.latency_median_ms, summary.end_code);
+  }
+  usageRows(from, to, username) {
+    return username === undefined ? this.statement("SELECT user,day,data FROM usage WHERE day>=? AND day<=? ORDER BY day,user").all(from, to) : this.statement("SELECT user,day,data FROM usage WHERE day>=? AND day<=? AND user=? ORDER BY day,user").all(from, to, username);
+  }
+  monthUsage(username) {
+    const result = { sttSeconds: 0, ttsAudioBytes: 0, ttsChars: 0, sessions: 0 }, today = this.day();
+    for (const row of this.usageRows(today.slice(0, 7) + "-01", today, username)) {
+      const data = JSON.parse(row.data);
+      for (const key of Object.keys(result)) result[key] += data[key] || 0;
+    }
+    return result;
+  }
+  analyzeUsage(from, to, username, prices) {
+    const totals = emptyTotals(), users = new Map();
+    const cost = data => Math.round((data.sttSeconds / 3600 * prices.stt + data.ttsAudioBytes / 48000 / 3600 * prices.tts) * 100) / 100;
+    const days = this.usageRows(from, to, username).map(row => {
+      const data = JSON.parse(row.data), values = emptyTotals();
+      if (!users.has(row.user)) users.set(row.user, emptyTotals());
+      for (const key of TOTALS) { values[key] = data[key] || 0; totals[key] += values[key]; users.get(row.user)[key] += values[key]; }
+      return { day: row.day, username: row.user, ...values };
+    });
+    const sql = "SELECT * FROM conversation_log WHERE started_at>=? AND started_at<?";
+    const after = new Date(Date.parse(to + "T00:00:00Z") + 86400000).toISOString();
+    const rows = username === undefined ? this.statement(sql).all(from + "T00:00:00.000Z", after) : this.statement(sql + " AND username=?").all(from + "T00:00:00.000Z", after, username);
+    const languages = new Map(), profiles = new Map();
+    for (const row of rows) {
+      const pair = row.language_a + "-" + row.language_b;
+      languages.set(pair, (languages.get(pair) || 0) + 1); profiles.set(row.profile, (profiles.get(row.profile) || 0) + 1);
+    }
+    return { from, to, days, totals: { ...totals, estimated_usd: cost(totals) }, by_user: [...users].sort(([a], [b]) => a.localeCompare(b)).map(([name, data]) => ({ username: name, ...data, estimated_usd: cost(data) })), conversations: {
+      count: rows.length, avg_duration_ms: rows.length ? Math.round(rows.reduce((n, row) => n + row.duration_ms, 0) / rows.length) : null,
+      languages: [...languages].map(([pair, count]) => ({ pair, count })), profiles: [...profiles].map(([profile, count]) => ({ profile, count })),
+      latency_median_ms: median(rows.map(row => row.latency_median_ms).filter(Number.isFinite)),
+    } };
+  }
+  listAudit(limit) { return this.statement("SELECT * FROM audit_log ORDER BY at DESC,rowid DESC LIMIT ?").all(limit); }
   touchLogin(username) { this.statement("UPDATE users SET last_login_at=? WHERE username=?").run(new Date().toISOString(), username); }
   countAdmins() { return this.statement("SELECT COUNT(*) AS count FROM users WHERE role='admin' AND disabled_at IS NULL").get().count; }
   createSession({ idHash, username, expiresAt, device = null }) {
@@ -98,7 +169,11 @@ class UsageStore {
   clearLegacyRevocation(username) { this.statement("DELETE FROM revoked_users WHERE user=?").run(username); }
   getCatalog(kind) { const row = this.db.prepare("SELECT data FROM catalogs WHERE kind=?").get(kind); return row ? JSON.parse(row.data) : null; }
   saveCatalog(kind, data) { this.db.prepare("INSERT INTO catalogs(kind,data) VALUES(?,?) ON CONFLICT(kind) DO UPDATE SET data=excluded.data").run(kind, JSON.stringify(data)); }
-  prune() { this.statement("DELETE FROM usage WHERE day < ?").run(new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10)); }
+  prune() {
+    const day = new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10);
+    this.statement("DELETE FROM usage WHERE day < ?").run(day);
+    this.statement("DELETE FROM conversation_log WHERE started_at < ?").run(day + "T00:00:00.000Z");
+  }
   close() { this.db.close(); }
 }
 module.exports = { UsageStore };
