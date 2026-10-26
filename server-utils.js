@@ -23,7 +23,7 @@ function normalizeLanguageCode(code) {
     .slice(0, 8);
 }
 
-const DEFAULT_STT_MODEL = "stt-rt-v5";
+const { STT_MODEL: DEFAULT_STT_MODEL, TTS_MODEL } = require("./runtime-models");
 
 function normalizeVoiceId(voice) {
   if (!voice || typeof voice !== "string") return "Adrian";
@@ -419,11 +419,11 @@ function serializeConversationItems(state) {
       target_language: item.target_language || "",
       source_text: item.source_text || "",
       translated_text: item.translated_text || "",
-      is_final: Boolean(item.is_final),
+      is_final: Boolean(item.is_final && item.final_translated_text.trim() && !item.non_final_translated_text),
     }));
 }
 
-function normalizeTtsVoiceList(modelsResponse, preferredModelId = "tts-rt-v1") {
+function normalizeTtsVoiceList(modelsResponse, preferredModelId = TTS_MODEL) {
   const models = extractSonioxModels(modelsResponse);
   const preferredModel = models.find((model) => model?.id === preferredModelId);
   const selectedModel =
@@ -461,7 +461,7 @@ function normalizeBoolean(value, fallback = true) {
 
 function normalizeEndpointDelay(value) {
   const number = Number(value);
-  if (!Number.isFinite(number)) return 500;
+  if (!Number.isFinite(number)) return 1500;
   return Math.max(500, Math.min(3000, Math.round(number)));
 }
 
@@ -471,24 +471,18 @@ function normalizeOutputMode(value) {
 }
 
 function chunkTextForTts(text, maxLength = 900) {
-  const clean = String(text || "").trim();
-  if (clean.length <= maxLength) return [clean].filter(Boolean);
+  if (!Number.isInteger(maxLength) || maxLength < 2) throw new RangeError("Invalid chunk size");
+  let remaining = String(text || "").trim();
   const chunks = [];
-  let remaining = clean;
   while (remaining.length > maxLength) {
-    let splitAt = Math.max(
-      remaining.lastIndexOf(". ", maxLength),
-      remaining.lastIndexOf("! ", maxLength),
-      remaining.lastIndexOf("? ", maxLength),
-      remaining.lastIndexOf(", ", maxLength),
-      remaining.lastIndexOf(" ", maxLength)
-    );
-    if (splitAt < Math.floor(maxLength * 0.45)) splitAt = maxLength;
-    chunks.push(remaining.slice(0, splitAt + 1).trim());
-    remaining = remaining.slice(splitAt + 1).trim();
+    let end = remaining.lastIndexOf(" ", maxLength);
+    if (end < Math.floor(maxLength * .45)) end = maxLength;
+    if (/[\uD800-\uDBFF]/.test(remaining[end - 1])) end--;
+    chunks.push(remaining.slice(0, end).trim());
+    remaining = remaining.slice(end).trimStart();
   }
   if (remaining) chunks.push(remaining);
-  return chunks.filter(Boolean).slice(0, 4);
+  return chunks.filter(Boolean);
 }
 
 module.exports = {

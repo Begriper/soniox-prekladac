@@ -17,3 +17,11 @@ Thumbs.db
 
 *.pem
 *.key
+.local-data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.playwright-cli/
+artifacts/
+
+output/playwright/

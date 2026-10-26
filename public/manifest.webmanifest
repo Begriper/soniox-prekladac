@@ -1,0 +1,18 @@
+{
+  "name": "Soniox prekladač",
+  "short_name": "Prekladač",
+  "lang": "sk",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#081319",
+  "theme_color": "#081319",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

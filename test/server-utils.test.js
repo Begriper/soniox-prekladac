@@ -33,7 +33,7 @@ test('normalizeEndpointDelay clamps to the supported latency window', () => {
   assert.equal(normalizeEndpointDelay(100), 500);
   assert.equal(normalizeEndpointDelay(900), 900);
   assert.equal(normalizeEndpointDelay(9999), 3000);
-  assert.equal(normalizeEndpointDelay('not-a-number'), 500);
+  assert.equal(normalizeEndpointDelay('not-a-number'), 1500);
 });
 
 test('normalizeOutputMode only allows speaker or headphones', () => {
@@ -48,12 +48,13 @@ test('normalizeBoolean accepts common string values and preserves fallback', () 
   assert.equal(normalizeBoolean(undefined, false), false);
 });
 
-test('chunkTextForTts splits long text on natural boundaries and caps chunks', () => {
+test('chunkTextForTts preserves all text beyond four bounded chunks', () => {
   const text = 'First sentence. Second sentence is longer. Third sentence continues. Fourth sentence continues. Fifth sentence continues.';
   const chunks = chunkTextForTts(text, 24);
   assert.ok(chunks.length > 1);
-  assert.ok(chunks.length <= 4);
-  assert.ok(chunks.every((chunk) => chunk.length <= 25));
+  assert.ok(chunks.length > 4);
+  assert.equal(chunks.join(' '), text);
+  assert.ok(chunks.every((chunk) => chunk.length <= 24));
   assert.equal(chunkTextForTts('  ahoj  ', 24)[0], 'ahoj');
 });
 
@@ -226,12 +227,12 @@ test('validateReplayTranslationRequest rejects empty or too long text', () => {
   assert.equal(validateReplayTranslationRequest({ text: 'Hallo', language: '' }, 10).ok, false);
 });
 
-test('normalizeTtsVoiceList keeps all voices from tts-rt-v1 with metadata', () => {
+test('normalizeTtsVoiceList keeps all voices from tts-rt-v2 with metadata', () => {
   const result = normalizeTtsVoiceList({
     models: [
       { id: 'legacy-tts', voices: [{ id: 'Old', gender: 'male' }] },
       {
-        id: 'tts-rt-v1',
+        id: 'tts-rt-v2',
         voices: [
           { id: 'Maya', name: 'Maya', gender: 'Female', description: 'Warm voice' },
           { voice: 'Daniel', gender: 'Male', description: 'Calm voice' }
@@ -240,7 +241,7 @@ test('normalizeTtsVoiceList keeps all voices from tts-rt-v1 with metadata', () =
     ]
   });
 
-  assert.equal(result.modelId, 'tts-rt-v1');
+  assert.equal(result.modelId, 'tts-rt-v2');
   assert.deepEqual(result.voices, [
     { id: 'Maya', name: 'Maya', gender: 'female', description: 'Warm voice' },
     { id: 'Daniel', name: 'Daniel', gender: 'male', description: 'Calm voice' }

@@ -6,3 +6,11 @@ node_modules
 .gitignore
 npm-debug.log
 .DS_Store
+.local-data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.playwright-cli/
+artifacts/
+
+output/playwright/
