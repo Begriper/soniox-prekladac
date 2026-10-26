@@ -1,175 +1,60 @@
-# Živý prekladač — v6.0 production hardening
+# Soniox prekladač — 3.0.0
 
-Verzia: `2.7.0-v6-production-hardening`
+Súkromná rodinná webová aplikácia: obojsmerný hovorený preklad na jednom telefóne. Vanilla HTML/CSS/JavaScript, Express, Soniox STT v5 a TTS v2. Implementácia je pripravená na lokálne overenie; produkcia sa v tejto úlohe nenasadzovala.
 
-Súkromný produkčný webový hlasový prekladač cez Soniox pre private/family použitie. v6.0 je konzervatívna hardening verzia: nemení stabilný Soniox STT tok, nemení login/session model a ponecháva REST TTS ako predvolený a stabilný TTS transport.
+## Spustenie
 
-## Čo aplikácia obsahuje
+Použi **Node 24 LTS**. Skopíruj .env.example do vlastného .env a vyplň API kľúč, náhodný session secret a **odlišné náhodné prístupové kódy aspoň 16 znakov** pre každého používateľa. Staré šesťmiestne kódy už server neprijme. Skutočný .env táto implementácia nemení.
 
-### Fáza 1 — auth
-
-- login obrazovka pred aplikáciou,
-- session cookie,
-- ochrana API endpointov,
-- ochrana WebSocketu pred neprihláseným používateľom.
-
-### Fáza 2 — credit guard
-
-- denné limity podľa používateľa,
-- limit aktívnych WebSocket spojení,
-- idle timeout,
-- WebSocket heartbeat,
-- `/api/usage`.
-
-### Fáza 3 — audio stability
-
-- audio sa posiela až po `server_ready`,
-- krátky pre-ready buffer,
-- korektné Soniox end-of-audio ukončenie,
-- fallback timeout pre finalizáciu.
-
-### Fáza 4 — conversation UX
-
-- režim `Reproduktor` / `Slúchadlá`,
-- `Textový režim`,
-- `Stop audio`,
-- `Zopakovať hlas`,
-- stavové čipy pre server, mikrofón, prehrávanie a režim.
-
-### Fáza 5 — performance AudioWorklet
-
-- `public/audio-capture-worklet.js`,
-- `AudioWorkletNode` ako primárny spôsob snímania mikrofónu,
-- fallback na `createScriptProcessor`, ak AudioWorklet nie je dostupný,
-- PCM chunk-y po 2048 vzorkách,
-- resampling výstupu na cieľových 16 kHz,
-- v UI vidíš, či ide `AudioWorklet` alebo fallback.
-
-### Fáza 5.1 — final hardening
-
-- bezpečnostné HTTP hlavičky,
-- chránený endpoint `/api/diagnostics`,
-- predvolený endpoint delay 500 ms,
-- čitateľnejšie usage hodnoty,
-- ochrana proti duplicitnému `playback_done`.
-
-### Fáza 6.0 — conservative production hardening
-
-- `.dockerignore` chráni aj `.env.*`, pričom `.env.example` ostáva bezpečný príklad,
-- jednotný release label `2.7.0-v6-production-hardening`,
-- verejný `/health` vracia iba minimálne bezpečné info,
-- detailné runtime info ostáva v `/api/diagnostics` za session,
-- diagnostika ukazuje aktuálny TTS transport a pripravené fallback counters,
-- session metrics obsahujú baseline timing pre tokeny, finálny preklad, TTS generovanie, `play_audio` a `playback_done`,
-- ľahký test harness cez Node built-in test runner bez nových dependencies,
-- drobný mobile UX polish pre jasnejší režim `Reproduktor` / `Slúchadlá`.
-
-## Dôležité produkčné rozhodnutia
-
-- REST TTS je stále predvolený transport.
-- Soniox TTS WebSocket nie je vo v6.0 primárny transport.
-- TTS WebSocket môže byť najskôr budúci v6.1 experiment za feature flagom a s REST fallbackom.
-- Soniox API key zostáva iba na backend-e.
-- Login/session, WebSocket auth, origin check, security headers a usage limity ostávajú zachované.
-- Denné kvóty a sessions sú stále in-memory a po reštarte Fly Machine sa vynulujú. To je akceptované pre private/family použitie, nie pre verejný multi-user SaaS.
-
-## Lokálne spustenie
-
-Vytvor `.env` podľa `.env.example`. Použi vlastné hodnoty, nikdy necommituj reálne secrets.
-
-Potom:
-
-```powershell
-npm install
+~~~sh
+npm ci
 npm run check
 npm test
-npm run audit
 npm start
-```
+~~~
 
-Otvor:
+Predvolené lokálne adresy sú http://localhost:3000 a http://127.0.0.1:3000. Pri inej adrese uprav celý APP_ORIGINS vrátane portu. Na telefóne je pre mikrofón potrebné HTTPS.
 
-```txt
-http://localhost:3000
-```
+Bez externých API môžeš spustiť node scripts/mock-app.cjs a otvoriť http://127.0.0.1:3210. Testovací kód je uvedený iba v testovacom helperi; tento server nie je súčasťou Docker image.
 
-## Diagnostika
+## Používanie
 
-Verejný health endpoint je zámerne minimálny:
+- Vyber svoj jazyk a jazyk druhej osoby. „Rozpoznať jazyk“ najprv potichu prepíše/preloží cudziu výpoveď a vyžiada potvrdenie. Potom otvorí obojsmernú konverzáciu.
+- „Počúvať“ zapne mikrofón. „Zastaviť počúvanie“ odošle zvyšok audia a dokončí posledný preklad. „Zastaviť hlas“ okamžite ruší aj čakajúcu syntézu.
+- Reproduktor je bezpečný predvolený režim. Slúchadlá vyber výslovne v nastaveniach. Dostupné sú samostatné hlasy oboch smerov, mužský/ženský filter, textový režim a zobrazenie oproti sebe.
+- História sa ukladá výhradne tlačidlom „Uložiť rozhovor“ do IndexedDB aktuálneho zariadenia a používateľa. Podporuje otvorenie, kopírovanie, textový export a vymazanie. Audio zostáva iba v obmedzenej pamäťovej cache.
+- Nový rozhovor upozorní na neuložený obsah. Po prerušení internetu zostane prepis v otvorenej karte; obnovenie nespúšťa staré audio znova.
+- Po zamknutí alebo opustení stránky obnov počúvanie. PWA neposkytuje offline preklad ani garantovaný beh na pozadí.
 
-```txt
-/health
-```
+## Prevádzka a bezpečnosť
 
-Po prihlásení môžeš v tom istom prehliadači otvoriť detailnú diagnostiku:
+SQLite ukladá iba denné rezervácie spotreby a katalógy modelov, žiadny rozhovor. Lokálne používa .local-data/usage.sqlite, v produkcii /data/usage.sqlite. Pri chybe účtovania nové platené operácie zlyhajú bezpečne. Rezervácie sú konzervatívne: aj neúspešný pokus/fallback môže stáť kredit, preto sa nevracia. STT sa rezervuje po 10 sekundách pripojenia, TTS podľa počtu pokusov a znakov; ide o limity aplikácie, nie faktúru Sonioxu. Denný reset je o polnoci UTC.
 
-```txt
-/api/diagnostics
-```
+API kľúč zostáva na serveri. Session cookie je podpísaná, HttpOnly, SameSite=Strict a v produkcii Secure. Odhlásenie/expirácia rušia príslušné WebSockety a syntézu. Origin sa overuje presne. X-Forwarded-For sa nepoužíva; TRUST_FLY_PROXY=true je určené iba pre Fly Proxy bez priameho verejného prístupu na aplikačný port.
 
-Diagnostika obsahuje bezpečné runtime informácie pre owner debugging vrátane:
+Katalógy sa pri používaní obnovujú najviac raz za 10 minút pre presný STT/TTS model; pri výpadku zostáva posledný úspešný katalóg vrátane stavu zastarania. Technické nastavenia latencie sú na serveri. Skriptové obmedzenia hlasu sa zobrazujú pri výbere jazyka.
 
-- verzie aplikácie,
-- Fly runtime identifikátorov,
-- Soniox regiónov/hostov,
-- aktuálneho TTS transportu (`rest`),
-- fallback counters pripravených pre budúce experimenty,
-- usage snapshotu,
-- security flags.
+## Nasadenie
 
-## Testovanie
+**Pred nasadením treba pripraviť jeden Fly Volume translator_data v regióne fra, pripojený na /data, s právom zápisu pre UID/GID 1000 (používateľ node).** Samotné chown v Docker image neprepíše vlastníctvo nového pripojeného volume. Server beží ako neprivilegovaný node; nepridávaj automatické obchádzanie tejto ochrany.
 
-Syntax check:
+Použi **jednu aplikačnú Machine**: nezávislé volumes na viacerých Machines nezdieľajú kvóty. Over existujúcu topológiu pred deployom. Pri nasadzovaní nevytváraj automaticky druhú HA Machine. Podrobný postup a návrat k pôvodnej verzii: [nasadenie](deployment.md).
 
-```powershell
-npm run check
-```
+## Dokumentácia
 
-Node built-in test runner:
+- [Implementácia a overenie](docs/modernization.md)
+- [Pôvodná dokumentácia pred modernizáciou — historický stav](docs/README-before-modernization.md)
 
-```powershell
-npm test
-```
+Staré nastavenia MAX_TTS_QUEUE, MAX_TTS_CHARS, MAX_TEXT_CHARS, MAX_WS_MESSAGE_KB, TTS_PLAYBACK_TIMEOUT_SECONDS a pomocné timeout premenné už nemenia pevné bezpečnostné limity. Aktuálne podporované hodnoty sú v .env.example. Zmena modelu je centrálne v runtime-models.js.
 
-Aktuálne testy pokrývajú čisté helper funkcie pre normalizáciu vstupov a TTS chunkovanie.
+## Modernizácia 3.1 (pripravená na staging)
 
-## Fly.io deployment
+- Nastav `APP_OWNER_USERNAME` na presné používateľské meno vlastníka z `APP_ACCESS_CODES`. Voliteľné `APP_OWNER_VOICE_NAME` je predvolene `my voice`. Aplikácia ukáže klon iba po zistení platného UUID a stavu `ready` pre `tts-rt-v2` v projekte priradenom k `SONIOX_API_KEY`.
+- `/api/voices` načíta všetky stránky `/v1/shared-voices` a zoznam vlastných hlasov. Pri nedostupnom API zostanú vstavané hlasy z posledného modelového katalógu; klon sa zamietne.
+- Profil sa vyberá pred začiatkom relácie. Kontextové výrazy sú orientačné pomôcky pre Soniox; pri medicíne a úradoch vždy over výsledný text. Len jednoznačné skratky CNC/CAD/CAM majú pevné `translation_terms`.
+- AUTO je predvolený režim. PTT drží audio otvorené, pri pustení pošle približne 200 ms ticha a `finalize`; relácia pokračuje po `<fin>`. Pri slúchadlách lokálna detekcia hlasnej novej reči preruší práve prehrávaný hlas. Pri reproduktore zostáva striedanie počúvania a prehrávania.
+- Vlastník môže cez Nastavenia zrušiť prístup ďalšieho účtu. Zrušenie sa uloží do SQLite a uzavrie jeho aktívne relácie. Pre nový prístup treba vymeniť jeho kód v konfigurácii a zaviesť samostatnú obnovu revokácie; aplikácia zámerne neobnovuje starý kód automaticky.
 
-Deployment sa nerobí automaticky. Pred nasadením musí prejsť:
+### Staging kontrola pred produkciou
 
-```powershell
-npm run check
-npm test
-npm run audit
-```
-
-Nasadenie na Fly rob iba po explicitnom schválení ownera:
-
-```powershell
-fly deploy -a soniox-prekladac
-```
-
-## Kontrolný checklist po nasadení
-
-1. Login funguje a bez loginu sa nedostaneš do aplikácie.
-2. Po štarte konverzácie vidíš `Počúvam… môžeš hovoriť (AudioWorklet)` alebo fallback audio.
-3. Preklad funguje v režime `Reproduktor` aj `Slúchadlá`.
-4. V režime `Reproduktor` sa mikrofón počas hovoreného prekladu stlmí.
-5. V režime `Slúchadlá` mikrofón zostáva aktívny; používaj ho iba so slúchadlami.
-6. `Textový režim` vypne hovorený výstup a šetrí TTS requesty.
-7. `Zopakovať hlas` prehrá posledné prijaté audio bez ďalšieho Soniox TTS requestu.
-8. Pri stopnutí vidíš `Dokončujem posledné slová…`.
-9. `/health` vracia iba minimálne bezpečné info.
-10. `/api/diagnostics` je dostupné iba po prihlásení.
-11. `npm run check` a `npm test` prešli pred deployom.
-
-## Stabilné časti, ktoré netreba meniť bez dôvodu
-
-- REST TTS default a fallback,
-- speaker-mode microphone mute,
-- login/session,
-- WebSocket session protection,
-- origin check,
-- security HTTP headers,
-- usage limity,
-- Soniox STT flow.
+Spusti `npm run check`, `npm test`, `npm audit --omit=dev` a Docker build. So skutočným Soniox projektom over `my voice` v SK/DE/PL, oba smery, Android Chrome, iPhone Safari, slúchadlá a hlasný reproduktor, hlučnú miestnosť a prerušenie siete. Zmeraj medián a P95 času po prvý počuteľný preklad. Pred nasadením zvlášť over návrat na predchádzajúci obraz Dockeru a použiteľnosť existujúceho volume. Reproduktorový barge-in ostáva vypnutý do fyzických testov ozveny.

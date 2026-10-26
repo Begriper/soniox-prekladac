@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-label="Soniox prekladač">
+  <rect width="192" height="192" rx="46" fill="#081319"/>
+  <rect x="8" y="8" width="176" height="176" rx="38" fill="#10282d" stroke="#34645f" stroke-width="2"/>
+  <g transform="scale(3)" fill="none" stroke-linecap="round">
+    <path d="M10 22c7-8 15-8 22 0s15 8 22 0" stroke="#4ed7cd" stroke-width="4.5"/>
+    <path d="M10 42c7-8 15-8 22 0s15 8 22 0" stroke="#81b7ef" stroke-width="4.5"/>
+    <circle cx="10" cy="22" r="3" fill="#4ed7cd" stroke="none"/>
+    <circle cx="54" cy="42" r="3" fill="#81b7ef" stroke="none"/>
+  </g>
+</svg>

@@ -7,6 +7,8 @@ primary_region = "fra"
 [env]
   PORT = "8080"
   NODE_ENV = "production"
+  USAGE_DB_PATH = "/data/usage.sqlite"
+  TRUST_FLY_PROXY = "true"
 
 [http_service]
   internal_port = 8080
@@ -15,3 +17,6 @@ primary_region = "fra"
   auto_start_machines = true
   min_machines_running = 1
   processes = ["app"]
+[[mounts]]
+  source = "translator_data"
+  destination = "/data"
