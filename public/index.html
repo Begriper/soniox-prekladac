@@ -60,14 +60,24 @@
       <div class="lang-pill" role="group" aria-label="Jazyky rozhovoru">
         <button id="langABtn" class="lang-btn lang-me" type="button" aria-label="Môj jazyk"><span class="lang-code" id="langACode">SK</span><span class="lang-name" id="langAName">Slovenčina</span></button>
         <button id="swapBtn" class="icon-btn swap-btn" type="button" aria-label="Vymeniť jazyky"><svg><use href="#i-swap"/></svg></button>
+        <span id="listenArrow" class="listen-arrow" aria-hidden="true" hidden>→</span>
         <button id="langBBtn" class="lang-btn lang-other" type="button" aria-label="Jazyk druhej osoby"><span class="lang-code" id="langBCode">DE</span><span class="lang-name" id="langBName">Nemčina</span></button>
       </div>
       <button id="moreBtn" class="icon-btn" type="button" aria-label="Menu"><svg><use href="#i-more"/></svg></button>
     </header>
 
+    <div id="sessionMode" class="segmented session-mode" role="radiogroup" aria-label="Režim prekladu">
+      <button type="button" role="radio" data-mode="conversation" aria-checked="true">Konverzácia</button><button type="button" role="radio" data-mode="listen" aria-checked="false">Počúvanie</button>
+    </div>
+    <div id="listenOptions" class="listen-options" role="group" aria-label="Výstup počúvania" hidden>
+      <label><input id="listenSubtitles" type="checkbox" checked> Titulky</label>
+      <label><input id="listenVoice" type="checkbox" checked> Hlas</label>
+    </div>
+
     <p id="errorBanner" class="banner banner-error" role="alert" hidden><span id="errorText"></span><button id="errorClose" class="icon-btn icon-sm" type="button" aria-label="Zavrieť upozornenie"><svg><use href="#i-close"/></svg></button></p>
 
     <section id="stage" class="stage" aria-label="Rozhovor">
+      <div id="listenCalm" class="empty listen-calm" role="status" hidden><p class="empty-title" id="listenCalmTitle">Počúvam</p><p class="empty-sub">Hlas ide do slúchadiel / reproduktora podľa telefónu.</p></div>
       <div id="feed" class="feed" aria-live="polite">
         <div id="emptyState" class="empty">
           <span class="empty-mark" aria-hidden="true"><svg><use href="#i-wave"/></svg></span>

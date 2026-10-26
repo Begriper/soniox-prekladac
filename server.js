@@ -76,6 +76,7 @@ function createApplication(env = process.env) {
     sessionTtsRequests: number(env, "MAX_TTS_REQUESTS_PER_SESSION", 120),
     sessionTtsBytes: number(env, "MAX_TTS_AUDIO_MB_PER_SESSION", 80) * 1024 * 1024,
     idleMs: number(env, "IDLE_TIMEOUT_SECONDS", 120) * 1000,
+    listenIdleMs: number(env, "LISTEN_IDLE_TIMEOUT_SECONDS", 300) * 1000,
   };
   const endpoint = {
     delay: number(env, "ENDPOINT_DELAY_MS", 1500, 500, 3000),

@@ -10,6 +10,7 @@ let toastTimer, connectTimer, finishTimer, reconnectTimer, stableTimer, cancelRe
 let pttPressed = false, pttSide = "", pttEnding = false, pttDraining = false, vadHits = 0;
 let pending = [], pendingBytes = 0, lastFrameAt = 0, captureWatch = null;
 let reconnectAttempts = 0, resumePending = false, faceMode = false;
+let mode = "conversation", listenSource = "auto", listenSubtitles = true, listenVoice = true, userStopped = false;
 let languageSide = "A", voiceSide = "A", voiceGender = "";
 const prefs = { conversationMode: "auto", outputMode: "speaker", ttsSpeed: "1", profileId: "conversation" };
 const MAX_CACHE = 12 * 1024 * 1024;
@@ -29,7 +30,8 @@ function error(message) { $("errorText").textContent = message || ""; $("errorBa
 function haptic() { try { navigator.vibrate?.(12); } catch {} }
 function name(code) { return code === "auto" ? "Rozpoznať jazyk" : languages.find(l => l.code === code)?.name || code; }
 function shortCode(code) { return code === "auto" ? "?" : String(code).toUpperCase(); }
-function ttsEnabled() { return prefs.outputMode !== "text"; }
+function ttsEnabled() { return mode === "listen" ? listenVoice : prefs.outputMode !== "text"; }
+function microphoneMode() { return mode === "listen" ? "auto" : prefs.conversationMode; }
 function outputMode() { return prefs.outputMode === "headphones" ? "headphones" : "speaker"; }
 function capitalize(text) { return text ? text[0].toLocaleUpperCase("sk") + text.slice(1) : text; }
 function el(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
@@ -41,7 +43,9 @@ function saveSettings() {
   store.set("langA", chosenA); store.set("langB", chosenB); store.set("voiceA", voiceA); store.set("voiceB", voiceB);
   store.set("conversationMode", prefs.conversationMode); store.set("outputMode", prefs.outputMode);
   store.set("ttsSpeed", prefs.ttsSpeed); store.set("profileId", prefs.profileId);
-  store.set("ttsEnabled", String(ttsEnabled()));
+  store.set("ttsEnabled", String(prefs.outputMode !== "text"));
+  store.set("mode", mode); store.set("listen_source", listenSource);
+  store.set("listenSubtitles", String(listenSubtitles)); store.set("listenVoice", String(listenVoice));
   const recent = [chosenA, chosenB, ...store.get("recent", "").split(",")].filter(c => c && c !== "auto");
   store.set("recent", [...new Set(recent)].slice(0, 6).join(","));
 }
@@ -59,19 +63,30 @@ function send(data) { if (socket?.readyState === WebSocket.OPEN) socket.send(JSO
 
 /* ---------- UI state ---------- */
 function controls() {
-  const app = $("appShell"), ptt = prefs.conversationMode === "ptt";
+  const app = $("appShell"), listen = mode === "listen", ptt = microphoneMode() === "ptt";
   const state = stopping ? "finishing" : reconnectTimer ? "reconnecting" : running ? (serverState === "idle" ? "connecting" : serverState) : resumePending ? "paused" : "idle";
   app.dataset.state = state;
+  app.dataset.mode = mode;
+  for (const b of $("sessionMode").querySelectorAll("button")) {
+    b.setAttribute("aria-checked", String(b.dataset.mode === mode)); b.disabled = running || stopping || Boolean(reconnectTimer);
+  }
+  $("listenOptions").hidden = !listen;
+  $("listenSubtitles").checked = listenSubtitles; $("listenVoice").checked = listenVoice;
+  $("listenCalm").hidden = !listen || listenSubtitles;
+  $("listenCalmTitle").textContent = running ? ["listening", "translating", "speaking"].includes(state) ? "Počúvam" : STATE_LABELS[state] || "Počúvam" : "Ťukni na mikrofón a počúvaj";
+  $("stage").setAttribute("aria-label", listen ? "Titulky počúvania" : "Rozhovor");
   app.classList.toggle("is-running", running);
   $("status").textContent = STATE_LABELS[state] || STATE_LABELS.idle;
-  $("modeLabel").textContent = (ttsEnabled() ? outputMode() === "speaker" ? "Reproduktor" : "Slúchadlá" : "Iba text") + (ptt ? " · Podržať" : "");
+  $("modeLabel").textContent = listen ? listenVoice ? "Hlas · výstup telefónu" : "Iba titulky" : (ttsEnabled() ? outputMode() === "speaker" ? "Reproduktor" : "Slúchadlá" : "Iba text") + (ptt ? " · Podržať" : "");
   $("langACode").textContent = shortCode(chosenA); $("langAName").textContent = capitalize(name(chosenA));
-  $("langBCode").textContent = shortCode(chosenB); $("langBName").textContent = capitalize(name(chosenB));
+  $("langBCode").textContent = shortCode(listen ? listenSource : chosenB); $("langBName").textContent = listen ? (listenSource === "auto" ? "Automaticky" : capitalize(name(listenSource))) + " ▾" : capitalize(name(chosenB));
+  $("langBBtn").setAttribute("aria-label", listen ? "Jazyk, ktorý počúvam" : "Jazyk druhej osoby");
+  $("swapBtn").hidden = listen; $("listenArrow").hidden = !listen;
   for (const id of ["langABtn", "langBBtn"]) $(id).disabled = running || stopping;
   $("swapBtn").disabled = running || stopping || chosenB === "auto";
   const mic = $("startBtn");
   mic.disabled = stopping || (!navigator.onLine && !running);
-  mic.setAttribute("aria-label", running ? "Zastaviť rozhovor" : entries.length ? "Pokračovať v rozhovore" : "Počúvať");
+  mic.setAttribute("aria-label", listen ? running ? "Zastaviť počúvanie" : "Spustiť počúvanie" : running ? "Zastaviť rozhovor" : entries.length ? "Pokračovať v rozhovore" : "Počúvať");
   $("autoControls").hidden = running && ptt;
   $("pttControls").hidden = !(running && ptt);
   for (const id of ["pttA", "pttB"]) $(id).disabled = !ready || stopping || pttEnding;
@@ -80,13 +95,14 @@ function controls() {
   $("stopAudioBtn").disabled = !playback && !localPlayback && !previewAbort;
   $("resumeBar").hidden = running || !resumePending || !entries.length;
   $("faceBtn").setAttribute("aria-pressed", String(faceMode));
-  $("facePanel").hidden = !faceMode;
-  $("feed").hidden = faceMode;
+  $("faceBtn").hidden = listen;
+  $("facePanel").hidden = listen || !faceMode;
+  $("feed").hidden = listen ? !listenSubtitles : faceMode;
   for (const group of document.querySelectorAll(".segmented[data-setting]")) {
     const value = prefs[group.dataset.setting];
     for (const b of group.querySelectorAll("button")) {
       b.setAttribute("aria-checked", String(b.dataset.value === value));
-      b.disabled = group.dataset.setting === "conversationMode" && (running || stopping);
+      b.disabled = (["conversationMode", "outputMode"].includes(group.dataset.setting) && listen) || (group.dataset.setting === "conversationMode" && (running || stopping));
     }
   }
   $("profileId").value = prefs.profileId; $("profileId").disabled = running || stopping;
@@ -95,7 +111,8 @@ function controls() {
   $("voiceBLabel").textContent = "Druhá osoba · " + capitalize(name(chosenB === "auto" ? chosenA : chosenB));
   $("voiceAValue").textContent = voices.find(v => v.id === voiceA)?.name || voiceA;
   $("voiceBValue").textContent = voices.find(v => v.id === voiceB)?.name || voiceB;
-  $("emptyTitle").textContent = running && ptt ? "Podrž tlačidlo svojho jazyka" : "Ťukni na mikrofón a hovor";
+  $("voiceBBtn").hidden = listen;
+  $("emptyTitle").textContent = listen ? running ? "Počúvam okolie" : "Ťukni na mikrofón a počúvaj" : running && ptt ? "Podrž tlačidlo svojho jazyka" : "Ťukni na mikrofón a hovor";
   $("emptySub").textContent = ttsEnabled() ? "Preklad sa zobrazí tu a prečíta nahlas." : "Preklad sa zobrazí tu.";
 }
 
@@ -111,10 +128,10 @@ function languageOption(code, title, sub, selected) {
 }
 function fillLanguageList() {
   const list = $("languageList"), term = normalize($("languageSearch").value.trim());
-  const selected = languageSide === "A" ? chosenA : chosenB;
+  const selected = languageSide === "A" ? chosenA : mode === "listen" ? listenSource : chosenB;
   list.replaceChildren();
   const matches = l => !term || normalize(l.name + " " + l.native_name + " " + l.code).includes(term);
-  if (languageSide === "B" && !term) list.append(languageOption("auto", "Rozpoznať jazyk", "Prvú vetu druhej osoby potvrdíš", selected === "auto"));
+  if (languageSide === "B" && !term) list.append(languageOption("auto", mode === "listen" ? "Automaticky" : "Rozpoznať jazyk", mode === "listen" ? "Priebežne rozpoznáva cudziu reč" : "Prvú vetu druhej osoby potvrdíš", selected === "auto"));
   const recent = store.get("recent", "").split(",").map(c => languages.find(l => l.code === c)).filter(Boolean);
   if (!term && recent.length) {
     list.append(el("p", "list-label", "Naposledy použité"));
@@ -130,13 +147,17 @@ function fillLanguageList() {
 }
 function openLanguages(side) {
   if (running || stopping) return;
-  languageSide = side; $("languageTitle").textContent = side === "A" ? "Môj jazyk" : "Jazyk druhej osoby";
+  languageSide = side; $("languageTitle").textContent = side === "A" ? "Môj jazyk" : mode === "listen" ? "Jazyk, ktorý počúvam" : "Jazyk druhej osoby";
   $("languageSearch").value = ""; fillLanguageList(); openSheet("languageSheet");
 }
 function selectLanguage(code) {
-  if (languageSide === "A") { if (code === chosenB) chosenB = chosenA; chosenA = code; }
+  if (mode === "listen" && languageSide === "B") {
+    if (code === chosenA) { toast("Vyber iný jazyk než svoj."); return; }
+    listenSource = code;
+  } else if (languageSide === "A") { if (code === chosenB) chosenB = chosenA; chosenA = code; }
   else { if (code === chosenA) chosenA = chosenB === "auto" ? chosenA : chosenB; chosenB = code; }
   if (chosenA === chosenB) chosenB = "auto";
+  if (listenSource === chosenA) listenSource = "auto";
   saveSettings(); $("languageSheet").close(); renderAll(); controls();
   const note = languages.find(l => l.code === code)?.script_note;
   if (note) toast(note);
@@ -474,6 +495,11 @@ async function showApp(session) {
   if (chosenB !== "auto" && !languages.some(l => l.code === chosenB)) chosenB = "de";
   voiceA = store.get("voiceA", "Adrian"); voiceB = store.get("voiceB", "Adrian"); ensureVoices();
   prefs.conversationMode = store.get("conversationMode", "auto") === "ptt" ? "ptt" : "auto";
+  mode = store.get("mode", "conversation") === "listen" ? "listen" : "conversation";
+  listenSource = store.get("listen_source", "auto");
+  if (listenSource === chosenA || listenSource !== "auto" && !languages.some(l => l.code === listenSource)) listenSource = "auto";
+  listenSubtitles = store.get("listenSubtitles", "true") !== "false"; listenVoice = store.get("listenVoice", "true") !== "false";
+  if (!listenSubtitles && !listenVoice) listenSubtitles = true;
   // Headphones keep the microphone open during playback, so the safe speaker mode is restored on every start.
   prefs.outputMode = store.get("outputMode", store.get("ttsEnabled", "true") === "false" ? "text" : "speaker") === "text" ? "text" : "speaker";
   prefs.ttsSpeed = ["0.9", "1", "1.15"].includes(store.get("ttsSpeed", "1")) ? store.get("ttsSpeed", "1") : "1";
@@ -570,7 +596,7 @@ function streamAudio(buffer) {
   schedule(buffer, op, completeStream);
 }
 function localAudio(buffer, id = crypto.randomUUID(), resolve) {
-  const op = { id, sources: new Set(), nextTime: 0, bytes: 0, resolve }; localPlayback = op; muted = outputMode() === "speaker" && running; controls();
+  const op = { id, sources: new Set(), nextTime: 0, bytes: 0, resolve }; localPlayback = op; muted = mode !== "listen" && outputMode() === "speaker" && running; controls();
   schedule(buffer, op, () => {
     if (op.sources.size || localPlayback !== op) return;
     localPlayback = null; send({ type: "local_playback_end", playback_id: id }); muted = false; controls(); resolve?.();
@@ -646,7 +672,7 @@ function renderItem(item) {
   node.src.textContent = item.source_text; node.src.lang = item.source_language || "und";
   node.tr.textContent = item.translated_text; node.tr.lang = item.target_language || "und";
   node.dir.textContent = shortCode(item.source_language || "?") + " → " + shortCode(item.target_language || "?");
-  node.audio.textContent = item.is_final ? AUDIO_LABELS[item.audio_status] || "" : "";
+  node.audio.textContent = mode === "listen" && !item.is_final ? "Priebežný preklad" : item.is_final ? AUDIO_LABELS[item.audio_status] || "" : "";
   node.button.hidden = !item.is_final || !item.translated_text.trim() || !ttsEnabled();
   node.button.disabled = !navigator.onLine;
 }
@@ -661,6 +687,8 @@ function render(changed) {
   const feed = $("feed"), pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 120;
   $("emptyState").hidden = entries.length > 0;
   for (const item of changed) renderItem(item);
+  const latest = entries.findLast(i => i.translated_text?.trim()) || entries.at(-1);
+  for (const [id, node] of nodes) node.article.classList.toggle("latest", id === latest?.id);
   renderFace();
   if (pinned) feed.scrollTop = feed.scrollHeight;
 }
@@ -722,20 +750,25 @@ function receive(msg) {
     error(msg.message);
     if (msg.fatal) { disconnect(); if (msg.code === "auth_expired") void signOut(false); }
   }
-  if (msg.type === "session_finished") { disconnect(); void api("/api/usage").then(showUsage).catch(() => {}); }
+  if (msg.type === "session_finished") {
+    const renew = mode === "listen" && msg.reason === "limit" && running && !userStopped && navigator.onLine && document.visibilityState === "visible";
+    disconnect();
+    if (renew) void start(true);
+    void api("/api/usage").then(showUsage).catch(() => {});
+  }
 }
 
 /* ---------- microphone ---------- */
 function sendPcm(buffer, flush = false) {
   if (!running || muted || (stopping && !flush)) return;
-  if (prefs.conversationMode === "ptt" && !pttPressed && !pttDraining) return;
+  if (microphoneMode() === "ptt" && !pttPressed && !pttDraining) return;
   // People start talking right after the tap; speech captured while the connection opens is sent once it is ready.
   if (!ready || socket?.readyState !== WebSocket.OPEN) {
     if (!stopping && pendingBytes + buffer.byteLength <= START_BUFFER_BYTES) { pending.push(buffer); pendingBytes += buffer.byteLength; }
     return;
   }
   // With headphones, loud new speech interrupts the translation that is playing.
-  if (prefs.conversationMode === "auto" && outputMode() === "headphones" && playback?.started && Date.now() - playback.createdAt > 300) {
+  if (mode !== "listen" && prefs.conversationMode === "auto" && outputMode() === "headphones" && playback?.started && Date.now() - playback.createdAt > 300) {
     const pcm = new Int16Array(buffer); let energy = 0;
     for (let i = 0; i < pcm.length; i += 4) energy += pcm[i] * pcm[i];
     const rms = Math.sqrt(energy / Math.max(1, Math.ceil(pcm.length / 4)));
@@ -805,12 +838,13 @@ async function lockScreen() {
 /* ---------- conversation lifecycle ---------- */
 async function start(automatic = false) {
   if (running || !user || !navigator.onLine) return;
-  if (chosenA === chosenB) { error("Vyber dva rôzne jazyky."); return; }
-  if (entries.length >= 1000) { error("Ulož rozhovor a začni nový."); return; }
+  if (mode === "listen" ? chosenA === listenSource : chosenA === chosenB) { error("Vyber dva rôzne jazyky."); return; }
+  if (mode !== "listen" && entries.length >= 1000) { error("Ulož rozhovor a začni nový."); return; }
   if (!automatic) { error(""); haptic(); reconnectAttempts = 0; }
   saveSettings(); stopLocal();
   clearTimeout(reconnectTimer); reconnectTimer = null; resumePending = false;
   running = true; stopping = false; ready = false; muted = false; serverState = "idle";
+  userStopped = false;
   const token = ++epoch; controls();
   try {
     await unlockAudio(automatic ? 400 : 0); if (epoch !== token) return;
@@ -821,7 +855,7 @@ async function start(automatic = false) {
     connectTimer = setTimeout(() => { if (socket === ws && !ready) connectionLost(); }, 12000);
     ws.onopen = () => {
       if (socket !== ws) { ws.close(); return; }
-      send({ type: "config", language_a: chosenA, language_b: chosenB, voice_a: voiceA, voice_b: voiceB, output_mode: outputMode(), tts_enabled: ttsEnabled(), tts_speed: prefs.ttsSpeed, profile_id: prefs.profileId, conversation_mode: prefs.conversationMode });
+      send({ type: "config", mode, ...(mode === "listen" ? { listen_source: listenSource } : {}), language_a: chosenA, language_b: chosenB, voice_a: voiceA, voice_b: voiceB, output_mode: outputMode(), tts_enabled: ttsEnabled(), tts_speed: prefs.ttsSpeed, profile_id: prefs.profileId, conversation_mode: microphoneMode() });
     };
     ws.onmessage = event => {
       if (socket !== ws) return;
@@ -848,6 +882,7 @@ function connectionLost() {
   controls();
 }
 async function pause() {
+  userStopped = true;
   if (stopping) return;
   haptic();
   if (!socket || socket.readyState !== WebSocket.OPEN) { disconnect(); return; }
@@ -858,6 +893,7 @@ async function pause() {
 // Synchronous on purpose: a hidden page may be frozen before any await resumes, so the stop
 // request and the short deadline are issued first. The server still finalizes the last sentence.
 function backgroundStop() {
+  userStopped = true;
   resumePending = true;
   if (!socket || socket.readyState !== WebSocket.OPEN) { disconnect(); controls(); return; }
   if (!stopping) { stopping = true; send({ type: "client_stop" }); void stopCapture(false); }
@@ -918,6 +954,23 @@ async function showHistory() {
 }
 
 /* ---------- settings ---------- */
+$("sessionMode").addEventListener("click", event => {
+  const button = event.target.closest("button[data-mode]");
+  if (!button || button.disabled || running || stopping || reconnectTimer || mode === button.dataset.mode) return;
+  mode = button.dataset.mode;
+  if (listenSource === chosenA) listenSource = "auto";
+  saveSettings(); renderAll(); controls();
+});
+for (const id of ["listenSubtitles", "listenVoice"]) $(id).addEventListener("change", () => {
+  listenSubtitles = $("listenSubtitles").checked; listenVoice = $("listenVoice").checked;
+  if (!listenSubtitles && !listenVoice) {
+    if (id === "listenSubtitles") listenVoice = true; else listenSubtitles = true;
+    toast(id === "listenSubtitles" ? "Hlas zostáva zapnutý." : "Titulky zostávajú zapnuté.");
+  }
+  saveSettings(); controls(); render(entries);
+  send({ type: "update_settings", tts_enabled: listenVoice });
+  if (!listenVoice) stopSound();
+});
 function settingsChanged() {
   saveSettings(); controls(); renderAll();
   send({ type: "update_settings", voice_a: voiceA, voice_b: voiceB, output_mode: outputMode(), tts_enabled: ttsEnabled(), tts_speed: prefs.ttsSpeed });
@@ -936,7 +989,7 @@ for (const group of document.querySelectorAll(".segmented[data-setting]")) {
 
 /* ---------- push to talk ---------- */
 function beginPtt(side) {
-  if (!running || !ready || stopping || pttPressed || pttEnding || prefs.conversationMode !== "ptt") return;
+  if (!running || !ready || stopping || pttPressed || pttEnding || microphoneMode() !== "ptt") return;
   if (playback || localPlayback) stopSound();
   pttPressed = true; pttSide = side; haptic();
   $("ptt" + side).classList.add("pressed");
