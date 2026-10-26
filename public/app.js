@@ -588,14 +588,23 @@ function connectionLost() {
   reconnectTimer = setTimeout(() => { reconnectTimer = null; void start(true).catch(e => error(e.message)); }, delay);
   controls();
 }
-async function pause(background = false) {
+async function pause() {
   if (stopping) return;
-  if (!background) haptic();
+  haptic();
   if (!socket || socket.readyState !== WebSocket.OPEN) { disconnect(); return; }
   stopping = true; controls(); await stopCapture(true);
   send({ type: "client_stop" });
-  // A hidden page may be frozen at any moment, so it waits only briefly for the last sentence.
-  finishTimer = setTimeout(() => { if (!background) error("Dokončenie trvalo príliš dlho."); disconnect(); }, background ? 1500 : 125000);
+  finishTimer = setTimeout(() => { error("Dokončenie trvalo príliš dlho."); disconnect(); }, 125000);
+}
+// Synchronous on purpose: a hidden page may be frozen before any await resumes, so the stop
+// request and the short deadline are issued first. The server still finalizes the last sentence.
+function backgroundStop() {
+  resumePending = true;
+  if (!socket || socket.readyState !== WebSocket.OPEN) { disconnect(); controls(); return; }
+  if (!stopping) { stopping = true; send({ type: "client_stop" }); void stopCapture(false); }
+  clearTimeout(finishTimer);
+  finishTimer = setTimeout(() => { disconnect(); controls(); }, 1500);
+  controls();
 }
 function disconnect() {
   epoch++; cancelRequest = ""; clearTimeout(connectTimer); clearTimeout(finishTimer); clearTimeout(reconnectTimer); clearTimeout(stableTimer); clearInterval(captureWatch); reconnectTimer = null; pending = []; pendingBytes = 0; pttDraining = false;
@@ -752,7 +761,7 @@ function connectivity() {
 window.addEventListener("online", connectivity); window.addEventListener("offline", connectivity);
 document.addEventListener("visibilitychange", () => {
   // Mobile browsers suspend the microphone in the background: finish cleanly and offer one-tap resume.
-  if (document.visibilityState === "hidden" && running) { resumePending = true; void pause(true).catch(() => disconnect()).finally(controls); }
+  if (document.visibilityState === "hidden" && running) backgroundStop();
   else if (document.visibilityState === "visible" && running && !wakeLock) void lockScreen();
 });
 window.addEventListener("pagehide", () => { send({ type: "client_stop" }); disconnect(); });
