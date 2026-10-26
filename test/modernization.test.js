@@ -89,3 +89,42 @@ test("ready clone is offered only to owner and rejected on every family TTS path
   const ws = await f.connect(family, { language_a: "sk", language_b: "de", voice_a: UUID });
   await until(() => ws.readyState === WebSocket.CLOSED);
 });
+
+test("Soniox keys travel only in the connection header", async t => {
+  const f = await fixture(); t.after(() => f.close());
+  const cookie = await f.login(), ws = await f.connect(cookie, { language_a: "sk", language_b: "de" });
+  await until(() => f.state.configs.length === 1);
+  f.turn(f.state.stt[0]);
+  await until(() => ws.messages.some(m => m.type === "tts_stream_end"));
+  assert.ok(f.state.authHeaders.length >= 2);
+  assert.ok(f.state.authHeaders.every(h => h === "Bearer mock-provider-key"));
+  assert.equal("api_key" in f.state.configs[0].config, false);
+  assert.ok(f.state.tts.flatMap(s => s.received).every(m => !("api_key" in m)));
+});
+
+test("released PTT keeps the Soniox stream alive with keepalives", async t => {
+  const f = await fixture(); t.after(() => f.close());
+  const cookie = await f.login(), ws = await f.connect(cookie, { language_a: "sk", language_b: "de", conversation_mode: "ptt" });
+  await until(() => ws.messages.some(m => m.type === "server_ready"));
+  const session = [...f.runtime.conversations.values()][0];
+  assert.equal(session.needsKeepalive(), true);
+  ws.send(JSON.stringify({ type: "ptt_start" }));
+  await until(() => session.pttActive);
+  assert.equal(session.needsKeepalive(), false);
+});
+
+test("a long pause mid-sentence closes the headphone TTS stream and later text starts a new one", async t => {
+  const f = await fixture(); t.after(() => f.close());
+  const cookie = await f.login(), ws = await f.connect(cookie, { language_a: "sk", language_b: "de", output_mode: "headphones" });
+  await until(() => f.state.configs.length === 1);
+  const provider = f.state.stt[0];
+  provider.send(JSON.stringify({ tokens: [{ text: "Ahoj ", language: "sk", is_final: true }, { text: "Hallo ", language: "de", source_language: "sk", translation_status: "translation", is_final: true }] }));
+  await until(() => f.state.tts.some(s => s.received.some(m => m.text_end === true)), 4000);
+  const first = ws.messages.find(m => m.type === "tts_stream_start");
+  await until(() => ws.messages.some(m => m.type === "tts_stream_end" && m.playback_id === first.playback_id));
+  ws.send(JSON.stringify({ type: "playback_done", playback_id: first.playback_id, status: "played" }));
+  provider.send(JSON.stringify({ tokens: [{ text: "svet.", language: "sk", is_final: true }, { text: "Welt.", language: "de", source_language: "sk", translation_status: "translation", is_final: true }, { text: "<end>", is_final: true }] }));
+  await until(() => ws.messages.filter(m => m.type === "tts_stream_start").length === 2, 4000);
+  const texts = f.state.tts.flatMap(s => s.received).filter(m => m.text !== undefined).map(m => [m.text, m.text_end]);
+  assert.deepEqual(texts, [["Hallo ", false], ["", true], ["Welt.", false], ["", true]]);
+});

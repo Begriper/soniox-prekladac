@@ -3,7 +3,7 @@ const WebSocket = require("ws");
 const { createApplication } = require("../../server");
 const CODE = "test-only-access-123456";
 async function fixture(options = {}) {
-  const state = { rest: [], configs: [], stt: [], tts: [], restDelay: 0, mode: "ok", autoReply: options.autoReply || false };
+  const state = { rest: [], configs: [], stt: [], tts: [], authHeaders: [], restDelay: 0, mode: "ok", autoReply: options.autoReply || false };
   const pcm = Buffer.alloc(4800);
   for (let i = 0; i < pcm.length / 2; i++) pcm.writeInt16LE(Math.round(1000 * Math.sin(i * .04)), i * 2);
   const provider = http.createServer(async (req, res) => {
@@ -37,6 +37,9 @@ async function fixture(options = {}) {
   }
   wss.on("connection", (ws, req) => {
     ws.on("error", () => {});
+    // Mirrors Soniox after 15 Jan 2027: the key must arrive with the connection.
+    state.authHeaders.push(req.headers.authorization);
+    if (req.headers.authorization !== "Bearer mock-provider-key") { ws.close(4001, "unauthenticated"); return; }
     if (req.url === "/stt") {
       state.stt.push(ws); ws.received = []; ws.binaryFrames = 0;
       ws.on("message", (data, binary) => {
