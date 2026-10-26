@@ -38,6 +38,17 @@ test("audio cancelled during a catalog refresh does not strand newer voice jobs"
   assert.ok(client.messages.some(m => m.type === "tts_stream_start" && m.utterance_id === "two"));
 });
 
+test("a stop after voice output was switched off during a catalog refresh still finishes the session", async t => {
+  let release; const gate = new Promise(r => { release = r; });
+  const { s, client } = session(t, { ensureVoices: () => gate });
+  s.enqueue("first", "de", "one");
+  await tick();
+  s.message(JSON.stringify({ type: "update_settings", output_mode: "speaker", tts_enabled: false }));
+  s.stop();
+  release(); await tick(); await tick();
+  assert.ok(client.messages.some(m => m.type === "session_finished"));
+});
+
 test("voice audio waits for a slow phone instead of failing, and the end follows the last chunk", async t => {
   const { s, client } = session(t);
   const op = { abort: new AbortController() }; s.playback = op;

@@ -387,7 +387,7 @@ class SpeechSession {
     await this.catalog.ensureVoices();
     this.preparingJob = null;
     // Audio cancelled while the catalog refreshed: newer jobs may have queued behind this one.
-    if (this.closed || audioGeneration !== this.audioGeneration || !this.ttsEnabled) { this.pump(); return; }
+    if (this.closed || audioGeneration !== this.audioGeneration || !this.ttsEnabled) { this.maybeFinish(); this.pump(); return; }
     if (!this.catalog.hasVoiceFor(this.auth.username, job.voice)) {
       this.audioStates.set(job.itemId, "not_spoken"); this.suppressed.add(job.itemId);
       job.ended = true; this.notifyJob(job); this.pending.delete(job.itemId);
