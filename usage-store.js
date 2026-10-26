@@ -62,8 +62,17 @@ class UsageStore {
   limitsFor(username) { return { ...this.limits, ...JSON.parse(this.getUser(username)?.limits_json || "{}") }; }
   setPasswordHash(username, hash) { return this.statement("UPDATE users SET password_hash=? WHERE username=?").run(hash, username).changes > 0; }
   setDisabled(username, disabled) {
-    // Keep an enabled administrator even when this method is used outside HTTP routes.
-    return this.statement("UPDATE users SET disabled_at=? WHERE username=? AND (?=0 OR role!='admin' OR disabled_at IS NOT NULL OR (SELECT COUNT(*) FROM users WHERE role='admin' AND disabled_at IS NULL)>1)").run(disabled ? new Date().toISOString() : null, username, Number(disabled)).changes > 0;
+    const at = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      // Keep an enabled administrator even when this method is used outside HTTP routes.
+      const changed = this.statement("UPDATE users SET disabled_at=? WHERE username=? AND (?=0 OR role!='admin' OR disabled_at IS NOT NULL OR (SELECT COUNT(*) FROM users WHERE role='admin' AND disabled_at IS NULL)>1)").run(disabled ? at : null, username, Number(disabled)).changes > 0;
+      // Mirrored into the v3.2 table so a rollback on the same volume still refuses the blocked code.
+      if (changed && disabled) this.statement("INSERT INTO revoked_users(user,revoked_at) VALUES(?,?) ON CONFLICT(user) DO NOTHING").run(username, at);
+      if (changed && !disabled) this.statement("DELETE FROM revoked_users WHERE user=?").run(username);
+      this.db.exec("COMMIT");
+      return changed;
+    } catch (err) { try { this.db.exec("ROLLBACK"); } catch {} throw err; }
   }
   setLimits(username, limits) { return this.statement("UPDATE users SET limits_json=? WHERE username=?").run(this.limitsJson(limits), username).changes > 0; }
   touchLogin(username) { this.statement("UPDATE users SET last_login_at=? WHERE username=?").run(new Date().toISOString(), username); }
@@ -77,13 +86,16 @@ class UsageStore {
   deleteSession(idHash) { this.statement("DELETE FROM auth_sessions WHERE id_hash=?").run(idHash); }
   deleteUserSessions(username) { this.statement("DELETE FROM auth_sessions WHERE username=?").run(username); }
   pruneSessions(now = Date.now()) { this.statement("DELETE FROM auth_sessions WHERE expires_at<=?").run(now); }
-  countSessions() { return this.statement("SELECT COUNT(*) AS count FROM auth_sessions").get().count; }
+  // Every account keeps at most `max` logins; the least recently used ones are signed out first.
+  trimUserSessions(username, max) { this.statement("DELETE FROM auth_sessions WHERE id_hash IN (SELECT id_hash FROM auth_sessions WHERE username=? ORDER BY last_seen_at DESC LIMIT -1 OFFSET ?)").run(username, max); }
   audit(actor, action, target = null, detail = null) { this.statement("INSERT INTO audit_log(at,actor,action,target,detail_json) VALUES(?,?,?,?,?)").run(new Date().toISOString(), actor, action, target, detail == null ? null : JSON.stringify(detail)); }
+  // Runs on every start: revocations made by an older release (for example after a rollback) are applied
+  // again; unblocking removes the legacy row, so this never undoes an unblock.
   migrateRevokedUsers() {
-    if (this.getCatalog("revoked_users_migrated")) return;
-    this.db.exec("UPDATE users SET disabled_at=COALESCE(disabled_at,(SELECT revoked_at FROM revoked_users WHERE user=users.username)) WHERE username IN (SELECT user FROM revoked_users)");
-    this.saveCatalog("revoked_users_migrated", true);
+    this.db.exec(`DELETE FROM auth_sessions WHERE username IN (SELECT username FROM users WHERE disabled_at IS NULL AND username IN (SELECT user FROM revoked_users));
+      UPDATE users SET disabled_at=(SELECT revoked_at FROM revoked_users WHERE user=users.username) WHERE disabled_at IS NULL AND username IN (SELECT user FROM revoked_users);`);
   }
+  clearLegacyRevocation(username) { this.statement("DELETE FROM revoked_users WHERE user=?").run(username); }
   getCatalog(kind) { const row = this.db.prepare("SELECT data FROM catalogs WHERE kind=?").get(kind); return row ? JSON.parse(row.data) : null; }
   saveCatalog(kind, data) { this.db.prepare("INSERT INTO catalogs(kind,data) VALUES(?,?) ON CONFLICT(kind) DO UPDATE SET data=excluded.data").run(kind, JSON.stringify(data)); }
   prune() { this.statement("DELETE FROM usage WHERE day < ?").run(new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10)); }

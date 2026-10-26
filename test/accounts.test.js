@@ -168,3 +168,27 @@ test("usage retention keeps 400 days and session pruning removes only expired ro
   store.createSession({ idHash: "new", username: "family", expiresAt: now + 10000 });
   store.pruneSessions(now); assert.equal(store.getSession("old"), undefined); assert.ok(store.getSession("new"));
 });
+test("logins are capped per account, so one account cannot lock out the owner", async t => {
+  const f = await fixture(); t.after(() => f.close());
+  for (let i = 0; i < 300; i++) f.runtime.store.createSession({ idHash: "h" + i, username: "family", expiresAt: Date.now() + 86400000 });
+  assert.equal((await f.request("/api/login", { username: "family", password: FAMILY })).status, 200);
+  assert.equal(f.runtime.store.db.prepare("SELECT COUNT(*) AS n FROM auth_sessions WHERE username='family'").get().n, 10);
+  assert.equal((await f.request("/api/login", { username: "owner", password: CODE })).status, 200);
+});
+test("blocking is mirrored for rollbacks and legacy revocations apply again on upgrade", async t => {
+  let f;
+  const db = database(t, async () => { if (f) await f.close(); });
+  f = await fixture({ db });
+  const owner = await f.login();
+  assert.equal((await f.request("/api/admin/users/family/revoke", {}, owner)).status, 200);
+  assert.ok(f.runtime.store.db.prepare("SELECT 1 FROM revoked_users WHERE user='family'").get(), "v3.2 still sees the block");
+  f.runtime.store.setDisabled("family", false);
+  assert.equal(f.runtime.store.db.prepare("SELECT 1 FROM revoked_users WHERE user='family'").get(), undefined);
+  const cookie = (await f.request("/api/login", { username: "family", password: FAMILY })).headers.get("set-cookie").split(";")[0];
+  await f.close();
+  // An older release revoked the account while rolled back on the same volume.
+  const old = new UsageStore(db); old.db.prepare("INSERT INTO revoked_users VALUES(?,?)").run("family", "2026-02-01T00:00:00.000Z"); old.close();
+  f = await fixture({ db });
+  assert.ok(f.runtime.store.getUser("family").disabled_at);
+  assert.equal((await f.request("/api/session", undefined, cookie)).status, 401);
+});

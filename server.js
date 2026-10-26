@@ -16,6 +16,7 @@ const { parseCookies, equal, validOrigin, clientIp, WindowLimiter } = require(".
 const APP_VERSION = "3.2.0";
 const COOKIE = "sl_session";
 const RESUME_WINDOW_MS = 5 * 60000;
+const MAX_LOGINS_PER_USER = 10;
 function number(env, key, fallback, min = 1, max = 1e12) {
   const value = Number(env[key] ?? fallback);
   if (!Number.isFinite(value) || value < min || value > max) throw new Error("Invalid configuration: " + key);
@@ -178,6 +179,7 @@ function createApplication(env = process.env) {
       // The environment credential is an explicit recovery path, including a lost role.
       if (recovering) {
         store.statement("UPDATE users SET role='admin',disabled_at=NULL WHERE username=?").run(ownerUsername);
+        store.clearLegacyRevocation(ownerUsername);
         store.audit(ownerUsername, "break_glass", ownerUsername);
       }
     } else if (legacy) {
@@ -190,8 +192,9 @@ function createApplication(env = process.env) {
     user = user && store.getUser(user.username);
     if (!user || user.disabled_at) return denied();
     store.pruneSessions(Date.now());
-    if (store.countSessions() >= 200) return res.status(429).json({ error: "Príliš veľa prihlásení." });
+    // A per-account cap instead of a global one: no account can fill the table and lock out the owner.
     const old = session(req); if (old) destroy(old.id);
+    store.trimUserSessions(user.username, MAX_LOGINS_PER_USER - 1);
     const auth = { id: crypto.randomBytes(32).toString("base64url"), username: user.username, expiresAt: Date.now() + ttl, role: user.role };
     store.createSession({ idHash: sessionHash(auth.id), username: auth.username, expiresAt: auth.expiresAt, device: (req.headers["user-agent"] || "").slice(0, 120) });
     store.touchLogin(user.username);
