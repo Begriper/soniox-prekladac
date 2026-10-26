@@ -6,13 +6,14 @@ let media = null, captureContext = null, worklet = null, wakeLock = null, flushR
 let playbackContext = null, playback = null, localPlayback = null, previewAbort = null;
 let entries = [], nodes = new Map(), audioCache = new Map(), audioCacheBytes = 0, ttsModel = "tts-rt-v2";
 let chosenA = "sk", chosenB = "de", voiceA = "Adrian", voiceB = "Adrian";
-let toastTimer, connectTimer, finishTimer, reconnectTimer, cancelRequest = "";
+let toastTimer, connectTimer, finishTimer, reconnectTimer, stableTimer, cancelRequest = "";
 let pttPressed = false, pttSide = "", pttEnding = false, vadHits = 0;
 let reconnectAttempts = 0, resumePending = false, faceMode = false;
 let languageSide = "A", voiceSide = "A", voiceGender = "";
 const prefs = { conversationMode: "auto", outputMode: "speaker", ttsSpeed: "1", profileId: "conversation" };
 const MAX_CACHE = 12 * 1024 * 1024;
-const RECONNECTABLE = new Set(["stt_connection", "stt_timeout"]);
+const RECONNECTABLE = new Set(["stt_connection", "stt_timeout", "stt_retry"]);
+const STABLE_MS = 30000;
 const STATE_LABELS = { idle: "Pripravený", connecting: "Pripájam…", listening: "Počúvam", translating: "Prekladám", speaking: "Hovorím", finishing: "Dokončujem preklad…", confirm_language: "Potvrď jazyk", reconnecting: "Obnovujem spojenie…", paused: "Pozastavené" };
 const AUDIO_LABELS = { pending: "Čaká", queued: "Vo fronte", played: "Prehrané", interrupted: "Prerušené", not_spoken: "Neprehrané", text_only: "Iba text" };
 const store = {
@@ -411,7 +412,12 @@ function renderAll() {
 function receive(msg) {
   if (msg.type === "session_open") { cancelRequest = ""; conversationId = msg.conversation_id; return; }
   if (msg.conversation_id !== conversationId) return;
-  if (msg.type === "server_ready") { ready = true; reconnectAttempts = 0; clearTimeout(connectTimer); controls(); }
+  if (msg.type === "server_ready") {
+    ready = true; clearTimeout(connectTimer); clearTimeout(stableTimer);
+    // A connection that drops again right after opening must not refill the retry budget.
+    stableTimer = setTimeout(() => { reconnectAttempts = 0; }, STABLE_MS);
+    controls();
+  }
   if (msg.type === "state") {
     ready = Boolean(msg.accept_audio); muted = Boolean(msg.microphone_muted);
     stopping = msg.state === "finishing"; serverState = msg.state;
@@ -512,7 +518,7 @@ async function start(automatic = false) {
   if (running || !user || !navigator.onLine) return;
   if (chosenA === chosenB) { error("Vyber dva rôzne jazyky."); return; }
   if (entries.length >= 1000) { error("Ulož rozhovor a začni nový."); return; }
-  if (!automatic) { error(""); haptic(); }
+  if (!automatic) { error(""); haptic(); reconnectAttempts = 0; }
   saveSettings(); stopLocal();
   clearTimeout(reconnectTimer); reconnectTimer = null; resumePending = false;
   running = true; stopping = false; ready = false; muted = false; serverState = "idle";
@@ -560,7 +566,7 @@ async function pause() {
   finishTimer = setTimeout(() => { error("Dokončenie trvalo príliš dlho."); disconnect(); }, 125000);
 }
 function disconnect() {
-  epoch++; cancelRequest = ""; clearTimeout(connectTimer); clearTimeout(finishTimer); clearTimeout(reconnectTimer); reconnectTimer = null;
+  epoch++; cancelRequest = ""; clearTimeout(connectTimer); clearTimeout(finishTimer); clearTimeout(reconnectTimer); clearTimeout(stableTimer); reconnectTimer = null;
   const ws = socket; socket = null;
   if (ws) { ws.onclose = null; ws.onerror = null; ws.onmessage = null; try { ws.close(); } catch {} }
   const changed = [];
