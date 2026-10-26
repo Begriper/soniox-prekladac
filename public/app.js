@@ -35,7 +35,7 @@ function capitalize(text) { return text ? text[0].toLocaleUpperCase("sk") + text
 function el(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
 function icon(id) { const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); const use = document.createElementNS("http://www.w3.org/2000/svg", "use"); use.setAttribute("href", "#" + id); svg.append(use); return svg; }
 function openSheet(id) { const d = $(id); if (!d.open) d.showModal(); }
-function closeSheets() { for (const d of document.querySelectorAll("dialog[open]")) d.close(); }
+function closeSheets() { for (const d of document.querySelectorAll("dialog[open]")) d.close(); document.body.append($("toast")); }
 
 function saveSettings() {
   store.set("langA", chosenA); store.set("langB", chosenB); store.set("voiceA", voiceA); store.set("voiceB", voiceB);
@@ -895,6 +895,8 @@ $("confirmLanguageBtn").addEventListener("click", () => send({ type: "confirm_la
 for (const d of document.querySelectorAll("dialog")) {
   d.addEventListener("click", event => { if (event.target === d) d.close(); });
   d.querySelector(".close-sheet")?.addEventListener("click", () => d.close());
+  // A toast shown inside a sheet that closes right after (copy, save) must stay visible.
+  d.addEventListener("close", () => { const t = $("toast"); if (d.contains(t)) (Array.from(document.querySelectorAll("dialog[open]")).at(-1) || document.body).append(t); });
 }
 $("adminBtn").addEventListener("click", () => {
   if (!adminRole) return;
