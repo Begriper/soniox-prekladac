@@ -6,6 +6,9 @@ const TTS_AUDIO_FORMAT = "pcm_s16le";
 const TTS_SAMPLE_RATE = 24000;
 const normalizeTtsTransport = value => ["auto", "ws", "rest"].includes(String(value).toLowerCase()) ? String(value).toLowerCase() : "auto";
 const createTtsStreamId = (prefix = "tts") => prefix + "-" + randomUUID();
+// Soniox allows 3 concurrent TTS streams per account by default, across all connections.
+// Prewarms always leave a slot free and give theirs up when real speech needs one.
+const accountStreams = new Set();
 class TtsWebSocketError extends Error {
   constructor(message, options = {}) {
     super(message); this.name = "TtsWebSocketError";
@@ -23,6 +26,7 @@ class SonioxTtsWebSocket {
       totalMs: options.totalMs ?? 30000, onState: options.onState || (() => {}),
       // Soniox ends a stream that receives no text for a few seconds, so old prewarms are not reused.
       prewarmMaxAgeMs: options.prewarmMaxAgeMs ?? 2000, clientReferenceId: options.clientReferenceId || "",
+      accountStreamLimit: options.accountStreamLimit ?? 3,
       onMetric: options.onMetric || (() => {}),
       ws: null, connectPromise: null, streams: new Map(), epoch: 0, reconnects: 0,
     });
@@ -84,10 +88,10 @@ class SonioxTtsWebSocket {
     if (epoch !== this.epoch) return;
     this.retireStalePrewarms();
     for (const config of configs.slice(0, 2)) {
-      if (this.streams.size >= 4 || [...this.streams.values()].some(s => s.language === config.language && s.voice === config.voice && s.speed === (config.speed || 1))) continue;
+      if (this.streams.size >= 4 || accountStreams.size >= this.accountStreamLimit - 1 || [...this.streams.values()].some(s => s.language === config.language && s.voice === config.voice && s.speed === (config.speed || 1))) continue;
       const streamId = createTtsStreamId("prewarm");
-      const stream = { streamId, ...config, speed: config.speed || 1, active: false, audioStarted: false, createdAt: Date.now() };
-      this.streams.set(streamId, stream);
+      const stream = { streamId, ...config, speed: config.speed || 1, active: false, audioStarted: false, createdAt: Date.now(), owner: this };
+      this.streams.set(streamId, stream); accountStreams.add(stream);
       this.sendJson(this.createStreamConfig(stream));
     }
   }
@@ -99,9 +103,15 @@ class SonioxTtsWebSocket {
     this.retireStalePrewarms();
     let stream = [...this.streams.values()].find(s => !s.active && s.language === language && s.voice === voice && s.speed === speed);
     const isNew = !stream;
-    if (!stream) stream = { streamId: createTtsStreamId(), language, voice, speed };
+    if (!stream) {
+      if (accountStreams.size >= this.accountStreamLimit) {
+        const idle = [...accountStreams].find(s => !s.active);
+        idle?.owner.fail(idle, new TtsWebSocketError("Prewarm released"));
+      }
+      stream = { streamId: createTtsStreamId(), language, voice, speed, owner: this };
+    }
     Object.assign(stream, { active: true, audioStarted: false, audioBytes: 0, audioChunks: 0, signal: options.signal, onAudio: options.onAudio || (() => {}) });
-    this.streams.set(stream.streamId, stream);
+    this.streams.set(stream.streamId, stream); accountStreams.add(stream);
     return new Promise((resolve, reject) => {
       stream.resolve = resolve; stream.reject = reject;
       stream.abort = () => this.fail(stream, new TtsWebSocketError("Cancelled", { cancelled: true, audioStarted: stream.audioStarted }));
@@ -129,7 +139,7 @@ class SonioxTtsWebSocket {
   cleanup(stream) {
     clearTimeout(stream.waitTimer); clearTimeout(stream.totalTimer);
     stream.signal?.removeEventListener("abort", stream.abort);
-    this.streams.delete(stream.streamId);
+    this.streams.delete(stream.streamId); accountStreams.delete(stream);
   }
   fail(stream, err) {
     if (!this.streams.has(stream.streamId)) return;
@@ -173,7 +183,7 @@ class SonioxTtsWebSocket {
   }
   close() {
     this.cancelActive(); this.rejectConnect?.(); clearInterval(this.keepAlive);
-    for (const s of this.streams.values()) this.cleanup(s);
+    for (const s of [...this.streams.values()]) this.cleanup(s);
     const ws = this.ws; this.ws = null;
     if (ws) { try { ws.readyState === this.WebSocketImpl.CONNECTING ? ws.terminate() : ws.close(); } catch {} }
   }
@@ -182,5 +192,5 @@ function isTransportFailure(err) {
   return !err.cancelled && ![400, 401, 402, 403, 404, 413, 422, 429].includes(Number(err.errorCode)) &&
     !["invalid_request", "unauthorized", "quota_exceeded", "rate_limit_exceeded", "client_unavailable"].includes(err.errorCode);
 }
-module.exports = { SonioxTtsWebSocket, TTS_AUDIO_FORMAT, TTS_MODEL, TTS_SAMPLE_RATE, TtsWebSocketError, createTtsStreamId, normalizeTtsTransport, isTransportFailure };
+module.exports = { accountStreams, SonioxTtsWebSocket, TTS_AUDIO_FORMAT, TTS_MODEL, TTS_SAMPLE_RATE, TtsWebSocketError, createTtsStreamId, normalizeTtsTransport, isTransportFailure };
 

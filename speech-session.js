@@ -7,6 +7,10 @@ const { contextFor } = require("./context-profiles");
 const { SonioxTtsWebSocket, isTransportFailure } = require("./tts-transport");
 const { synthesizeRest } = require("./tts-rest");
 const TTS_PAUSE_MS = 2000;
+// Voice audio waits in memory while the phone's socket buffer is full instead of failing on a slow network.
+const CLIENT_BUFFER_BYTES = 256 * 1024, OUTBOX_MAX_BYTES = 6 * 1024 * 1024;
+// Microphone frames captured just before playback ended still carry the loudspeaker's tail.
+const ECHO_GUARD_MS = 250;
 const { createConversationTimelineState, appendConversationToken, clearConversationNonFinalText, markConversationEndpoint, serializeConversationItems, chunkTextForTts } = require("./server-utils");
 
 class SpeechSession {
@@ -24,6 +28,7 @@ class SpeechSession {
     this.sessionAudio = 0; this.sessionTtsBytes = 0; this.sessionTtsRequests = 0;
     this.ttsFailures = 0; this.restUntil = 0; this.audioStates = new Map(); this.endpointTimes = new Map();
     this.timings = []; this.timerSet = new Set(); this.isAlive = true; this.frameCount = 0;
+    this.outbox = []; this.outboxBytes = 0; this.outboxTimer = null; this.drainWaiters = []; this.echoUntil = 0;
     this.synthesis = new SonioxTtsWebSocket({ url: this.urls.ttsWs, apiKey: this.apiKey, clientReferenceId: this.auth.username });
     this.configTimer = this.later(() => this.end("Konfigurácia neprišla včas."), 12000);
     this.expiryTimer = this.later(() => this.end("Prihlásenie vypršalo.", "auth_expired"), Math.max(1, this.auth.expiresAt - Date.now()));
@@ -65,7 +70,26 @@ class SpeechSession {
     catch { this.end("Účtovanie spotreby nie je dostupné.", "usage_unavailable"); return false; }
     this.end("Denný limit bol vyčerpaný.", "quota_exceeded"); return false;
   }
-  muted() { return this.outputMode === "speaker" && Boolean(this.playback || this.localPlayback); }
+  muted() { return this.outputMode === "speaker" && Boolean(this.playback?.audioStarted || this.localPlayback); }
+  guardEcho() { if (this.outputMode === "speaker") this.echoUntil = Date.now() + ECHO_GUARD_MS; }
+  sendAudio(op, buffer) {
+    if (this.outboxBytes + buffer.length > OUTBOX_MAX_BYTES) throw Object.assign(new Error("slow client"), { errorCode: "client_unavailable" });
+    this.outbox.push({ op, buffer }); this.outboxBytes += buffer.length;
+    this.flushOutbox();
+  }
+  flushOutbox() {
+    while (this.outbox.length && !this.closed && this.client.readyState === WebSocket.OPEN && this.client.bufferedAmount < CLIENT_BUFFER_BYTES) {
+      const { op, buffer } = this.outbox.shift(); this.outboxBytes -= buffer.length;
+      if (this.playback === op && !op.abort.signal.aborted) this.client.send(buffer, { binary: true });
+    }
+    if (this.outbox.length && !this.closed && !this.outboxTimer) this.outboxTimer = setTimeout(() => { this.outboxTimer = null; this.guard(() => this.flushOutbox()); }, 20);
+    if (!this.outbox.length || this.closed) { for (const resolve of this.drainWaiters.splice(0)) resolve(); }
+  }
+  clearOutbox() {
+    this.outbox = []; this.outboxBytes = 0; clearTimeout(this.outboxTimer); this.outboxTimer = null;
+    for (const resolve of this.drainWaiters.splice(0)) resolve();
+  }
+  drainAudio() { return this.outbox.length && !this.closed ? new Promise(resolve => this.drainWaiters.push(resolve)) : Promise.resolve(); }
   // Soniox closes the stream after 20 s without audio or keepalive; PTT drops audio while released.
   needsKeepalive() { return !this.acceptAudio || this.muted() || (this.conversationMode === "ptt" && !this.pttActive); }
   state() {
@@ -129,7 +153,7 @@ class SpeechSession {
       return;
     }
     if (msg.type === "local_playback_end") {
-      if (this.localPlayback === msg.playback_id) { this.localPlayback = null; clearTimeout(this.localTimer); this.state(); this.pump(); } return;
+      if (this.localPlayback === msg.playback_id) { this.localPlayback = null; clearTimeout(this.localTimer); this.guardEcho(); this.state(); this.pump(); } return;
     }
     if (this.finishing) return;
     if (msg.type === "local_playback_start") {
@@ -166,7 +190,7 @@ class SpeechSession {
     }
   }
   audio(data) {
-    if (!this.acceptAudio || this.muted() || this.finishing || this.closed || (this.conversationMode === "ptt" && !this.pttActive)) return;
+    if (!this.acceptAudio || this.muted() || Date.now() < this.echoUntil || this.finishing || this.closed || (this.conversationMode === "ptt" && !this.pttActive)) return;
     if (!data.length || data.length % 2 || data.length > 16384) { this.end("Neplatný audio rámec."); return; }
     if (this.stt?.readyState !== WebSocket.OPEN) return;
     if (this.stt.bufferedAmount > 256 * 1024) { this.end("Spojenie nestíha prenášať zvuk. Obnov rozhovor.", "audio_overload"); return; }
@@ -352,7 +376,7 @@ class SpeechSession {
     const op = this.playback; this.playback = null;
     if (op) { op.abort.abort(); op.job.ended = true; this.notifyJob(op.job); clearTimeout(op.timer); this.audioStates.set(op.job.itemId, "interrupted"); this.send({ type: "tts_stream_end", playback_id: op.id, cancelled: true }); }
     this.synthesis.cancelActive();
-    this.localPlayback = null; clearTimeout(this.localTimer);
+    this.localPlayback = null; clearTimeout(this.localTimer); this.clearOutbox();
     this.send({ type: "audio_cancelled", request_id: requestId }); this.updateItems(); this.state();
   }
   async pump() {
@@ -360,9 +384,10 @@ class SpeechSession {
     const job = this.queue.shift(); if (!job) { this.state(); this.maybeFinish(); return; }
     this.preparingJob = job;
     const audioGeneration = this.audioGeneration;
-    await this.catalog.refreshVoices();
+    await this.catalog.ensureVoices();
     this.preparingJob = null;
-    if (this.closed || audioGeneration !== this.audioGeneration || !this.ttsEnabled) { this.maybeFinish(); return; }
+    // Audio cancelled while the catalog refreshed: newer jobs may have queued behind this one.
+    if (this.closed || audioGeneration !== this.audioGeneration || !this.ttsEnabled) { this.pump(); return; }
     if (!this.catalog.hasVoiceFor(this.auth.username, job.voice)) {
       this.audioStates.set(job.itemId, "not_spoken"); this.suppressed.add(job.itemId);
       job.ended = true; this.notifyJob(job); this.pending.delete(job.itemId);
@@ -384,14 +409,16 @@ class SpeechSession {
     };
     const audio = buffer => {
       if (!current()) return;
-      if (this.client.readyState !== WebSocket.OPEN || this.client.bufferedAmount + buffer.length > 512 * 1024) throw Object.assign(new Error("slow client"), { errorCode: "client_unavailable" });
+      if (this.client.readyState !== WebSocket.OPEN) throw Object.assign(new Error("client closed"), { errorCode: "client_unavailable" });
       if (this.sessionTtsBytes + buffer.length > this.limits.sessionTtsBytes || !this.reserve({ ttsAudioBytes: buffer.length })) throw Object.assign(new Error("audio quota"), { errorCode: "quota_exceeded" });
       this.sessionTtsBytes += buffer.length; op.bytes += buffer.length;
+      this.sendAudio(op, buffer);
       if (!op.audioStarted) {
         op.audioStarted = true;
         op.firstAudioMs = Date.now() - op.started;
+        // The speaker microphone is muted from the first audible sample, not while waiting for it.
+        this.state();
       }
-      this.client.send(buffer, { binary: true });
     };
     try {
       let useRest = this.transport === "rest" || (this.transport === "auto" && Date.now() < this.restUntil);
@@ -414,15 +441,19 @@ class SpeechSession {
         if (!current()) return;
         if (!reserveAttempt([...job.text].length)) throw new Error("quota");
         begin("rest");
-        const buffer = await synthesizeRest({ url: this.urls.ttsRest, apiKey: this.apiKey, ...job, signal: op.abort.signal });
-        if (!current()) return;
-        for (let i = 0; i < buffer.length; i += 16384) audio(buffer.subarray(i, i + 16384));
+        await synthesizeRest({ url: this.urls.ttsRest, apiKey: this.apiKey, ...job, signal: op.abort.signal, onChunk: chunk => {
+          for (let i = 0; i < chunk.length; i += 16384) audio(chunk.subarray(i, i + 16384));
+        } });
       }
+      // The end marker must follow the last audio chunk still waiting for a slow phone.
+      await this.drainAudio();
       if (!current()) return;
       op.synthesisDone = true;
       this.send({ type: "tts_stream_end", playback_id: op.id, text: job.text });
       op.timer = this.later(() => this.playbackDone({ playback_id: op.id, status: "interrupted" }), Math.ceil(op.bytes / 48000 * 1000) + 15000);
     } catch {
+      if (!current()) return;
+      await this.drainAudio();
       if (!current()) return;
       job.ended = true; this.notifyJob(job);
       if (this.pending.get(job.itemId) === job) this.pending.delete(job.itemId);
@@ -437,7 +468,7 @@ class SpeechSession {
   playbackDone(msg) {
     const op = this.playback;
     if (!op || op.id !== msg.playback_id || !op.synthesisDone) return;
-    clearTimeout(op.timer); this.playback = null;
+    clearTimeout(op.timer); this.playback = null; if (op.audioStarted) this.guardEcho();
     if (this.pending.get(op.job.itemId) === op.job) this.pending.delete(op.job.itemId);
     const previous = this.audioStates.get(op.job.itemId);
     const failed = msg.status !== "played" || ["interrupted", "not_spoken"].includes(previous);
@@ -475,7 +506,7 @@ class SpeechSession {
     this.playback?.abort.abort(); clearTimeout(this.playback?.timer);
     this.synthesis.close();
     if (this.stt) { try { this.stt.terminate(); } catch {} this.stt = null; }
-    this.queue = [];
+    this.queue = []; this.clearOutbox();
     for (const job of this.pending.values()) { job.ended = true; this.notifyJob(job); }
     this.pending.clear();
     this.onClose?.(this.snapshot());
