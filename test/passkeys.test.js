@@ -129,10 +129,15 @@ test("assertion challenge cookies are signed, client-bound and single-use even o
   assert.equal((await f.request(root + "/login", bad, third.cookie)).status, 400);
   assert.equal((await f.request(root + "/login", a.response(third.options, f.origin, false), third.cookie)).status, 400);
 });
-test("nonzero counters must increase, while zero-valued platform counters remain usable", async t => {
+test("nonzero counters must increase and can never be reset to zero", async t => {
   const f = await setup(t), a = await register(f, authenticator(), f.family, { count: 4 });
-  for (const [count, status] of [[5, 200], [5, 400], [4, 400], [0, 200], [0, 200], [1, 200]]) assert.equal((await login(f, a, { count })).status, status);
-  assert.equal(f.runtime.store.getPasskey(a.id).sign_count, 1);
+  for (const [count, status] of [[5, 200], [5, 400], [4, 400], [0, 400], [6, 200]]) assert.equal((await login(f, a, { count })).status, status);
+  assert.equal(f.runtime.store.getPasskey(a.id).sign_count, 6);
+});
+test("zero-valued platform counters remain usable while they stay zero", async t => {
+  const f = await setup(t), a = await register(f, authenticator(), f.family, { count: 0 });
+  for (const count of [0, 0]) assert.equal((await login(f, a, { count })).status, 200);
+  assert.equal(f.runtime.store.getPasskey(a.id).sign_count, 0);
 });
 test("unknown, disabled and deleted credentials cannot log in; users can delete only their own", async t => {
   const f = await setup(t), a = await register(f), unknown = await login(f, authenticator());

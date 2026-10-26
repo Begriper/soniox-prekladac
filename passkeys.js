@@ -101,7 +101,8 @@ function installPasskeyApi(app, { store, requireSession, finishLogin, origins, s
       const key = crypto.createPublicKey({ key: decode(credential.public_key), format: "der", type: "spki" });
       const options = credential.alg === -7 ? { key, dsaEncoding: "der" } : { key, padding: crypto.constants.RSA_PKCS1_PADDING };
       if (![-7, -257].includes(credential.alg) || !crypto.verify("sha256", Buffer.concat([data.auth, sha256(data.clientBytes)]), options, decode(req.body.response.signature))) throw new Error("Invalid signature");
-      if (credential.sign_count && data.count && data.count <= credential.sign_count) throw new Error("Invalid counter");
+      // Platform passkeys may always report 0; once a counter was seen, any non-increase (including 0) is a clone signal.
+      if (credential.sign_count && data.count <= credential.sign_count) throw new Error("Invalid counter");
     } catch { return invalid(res); }
     finishLogin(req, res, user, "passkey_login", () => store.statement("UPDATE passkeys SET sign_count=?,last_used_at=? WHERE id=?").run(data.count, new Date().toISOString(), credential.id));
   });
