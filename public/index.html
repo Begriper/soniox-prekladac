@@ -158,11 +158,50 @@
     </section>
     <section class="group">
       <h3 class="group-title">Účet</h3>
-      <p id="usageInfo" class="hint"></p>
-      <div id="accessPanel" hidden><p class="hint">Zrušenie prístupu okamžite ukončí aj aktívne relácie.</p><div id="accessUsers" class="list"></div></div>
+      <div id="usageInfo" class="usage-bars"></div>
+      <button id="adminBtn" class="row-btn" type="button" hidden><span class="row-main"><span class="row-value">Správa používateľov</span></span><svg><use href="#i-chevron"/></svg></button>
       <button id="logoutBtn" class="btn btn-danger btn-block" type="button">Odhlásiť sa</button>
       <p id="catalogNote" class="hint"></p>
     </section>
+  </dialog>
+
+  <dialog id="adminSheet" class="sheet admin-sheet" aria-labelledby="adminTitle">
+    <div class="sheet-head"><h2 id="adminTitle">Správa</h2><div class="sheet-tools"><button id="newUserBtn" class="btn btn-ghost" type="button">+ Nový</button><button class="icon-btn close-sheet" type="button" aria-label="Zavrieť"><svg><use href="#i-close"/></svg></button></div></div>
+    <p id="adminStatus" class="sheet-note" role="status"></p>
+    <section class="group"><h3 class="group-title">Používatelia</h3><div id="adminUsers" class="list"></div></section>
+    <section class="group"><h3 class="group-title">Spotreba (30 dní)</h3><div id="adminUsage"></div><button id="sonioxUsageBtn" class="btn btn-ghost" type="button">Skutočná cena zo Sonioxu</button><div id="sonioxUsage" aria-live="polite"></div><p class="hint">Rezervovaná spotreba · odhad nie je faktúra. Dni sú v UTC.</p></section>
+    <details class="group" id="auditDetails"><summary>Posledné zmeny</summary><div id="adminAudit" class="list"></div></details>
+  </dialog>
+
+  <dialog id="userSheet" class="sheet admin-sheet" aria-labelledby="userTitle">
+    <div class="sheet-head"><h2 id="userTitle"></h2><button class="icon-btn close-sheet" type="button" aria-label="Späť do správy"><svg><use href="#i-close"/></svg></button></div>
+    <section class="group"><div id="userBadges" class="badges"></div><p id="userNote" class="hint admin-note"></p></section>
+    <section class="group"><h3 class="group-title">Tento mesiac</h3><div id="userUsage"></div><h3 class="group-title">Rozpoznávanie · 30 dní</h3><div id="userChart"></div></section>
+    <form id="limitsForm" class="group">
+      <h3 class="group-title">Limity</h3>
+      <label class="field"><span class="field-label">Minúty denne</span><input id="limitMinutes" type="number" min="0" max="16666666666" step="any" inputmode="decimal"></label>
+      <label class="field"><span class="field-label">Hlasové znaky denne</span><input id="limitChars" type="number" min="0" max="1000000000000" step="1" inputmode="numeric"></label>
+      <label class="field"><span class="field-label">Rozhovory denne</span><input id="limitSessions" type="number" min="0" max="1000000000000" step="1" inputmode="numeric"></label>
+      <label class="field"><span class="field-label">Minúty mesačne</span><input id="limitMonth" type="number" min="0" max="16666666666" step="any" inputmode="decimal"></label>
+      <p class="hint">Prázdne = predvolený limit. Obnova o polnoci UTC.</p><button class="btn btn-primary" type="submit">Uložiť limity</button>
+    </form>
+    <section class="group"><h3 class="group-title">Akcie</h3><div id="userActions" class="admin-actions"></div></section>
+    <section id="userInvitation" class="group" hidden></section>
+    <section class="group"><h3 class="group-title">Prihlásené zariadenia</h3><div id="userDevices" class="list"></div></section>
+  </dialog>
+
+  <dialog id="newUserSheet" class="sheet admin-sheet" aria-labelledby="newUserTitle">
+    <div class="sheet-head"><h2 id="newUserTitle">Nový používateľ</h2><button class="icon-btn close-sheet" type="button" aria-label="Späť do správy"><svg><use href="#i-close"/></svg></button></div>
+    <form id="newUserForm" class="group">
+      <label class="field"><span class="field-label">Meno</span><input id="newUsername" required minlength="2" maxlength="40" pattern="[a-z0-9][a-z0-9._\-]{1,39}" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="usernameHint"></label><p id="usernameHint" class="hint">2–40 znakov: malé písmená, číslice, . _ -</p>
+      <div id="newUserRole" class="segmented" role="radiogroup" aria-label="Rola"><button type="button" role="radio" data-value="user" aria-checked="true">Používateľ</button><button type="button" role="radio" data-value="admin" aria-checked="false">Admin</button></div>
+      <label class="field"><span class="field-label">Heslo (voliteľné)</span><input id="newPassword" type="password" minlength="12" maxlength="512" autocomplete="new-password" placeholder="Prázdne = vygenerovať"></label>
+      <label class="field"><span class="field-label">Poznámka (voliteľná)</span><textarea id="newNote" maxlength="200" rows="2"></textarea></label>
+      <label class="field"><span class="field-label">Minúty denne (voliteľné)</span><input id="newMinutes" type="number" min="0" max="16666666666" step="any" inputmode="decimal"></label>
+      <label class="field"><span class="field-label">Minúty mesačne (voliteľné)</span><input id="newMonth" type="number" min="0" max="16666666666" step="any" inputmode="decimal"></label>
+      <button class="btn btn-primary" type="submit">Vytvoriť účet</button>
+    </form>
+    <section id="newInvitation" class="group" hidden></section>
   </dialog>
 
   <dialog id="voiceSheet" class="sheet" aria-labelledby="voiceTitle">

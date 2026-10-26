@@ -277,8 +277,47 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .chips { display: flex; gap: 8px; padding: 0 16px 8px; overflow-x: auto; }
 .chip { min-height: 36px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 999px; background: transparent; color: var(--muted); font-size: 0.85rem; font-weight: 700; white-space: nowrap; }
 .chip[aria-checked="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
-.access-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 48px; padding: 0 6px; }
-.access-row .btn { min-height: 36px; padding: 0 12px; font-size: 0.82rem; }
+/* Account and administration */
+.usage-bars { display: grid; gap: 12px; min-width: 0; }
+.account-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-bar { display: grid; gap: 6px; width: 100%; min-width: 0; }
+.usage-label { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 0.75rem; }
+.usage-label span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-label span:last-child { flex-shrink: 0; }
+.usage-track { height: 5px; overflow: hidden; border-radius: 9px; background: var(--line-strong); }
+.usage-fill { height: 100%; border-radius: inherit; background: var(--me); }
+.usage-fill.warning { background: var(--warn); }
+.admin-sheet .group, .admin-sheet .group > *, .admin-sheet .list { min-width: 0; }
+.admin-sheet .sheet-head h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-tools { display: flex; align-items: center; gap: 6px; flex: none; }
+.sheet-tools .btn { min-height: 44px; padding: 0 14px; }
+.admin-sheet .list { padding: 0; gap: 6px; }
+.admin-sheet .option { min-width: 0; padding: 10px 0; }
+.admin-sheet .user-card { display: grid; gap: 12px; padding: 14px; background: var(--sunken); border: 1px solid var(--line); }
+.user-card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.user-card-head > .option-title { flex: 1; min-width: 0; }
+.badges { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.user-card-head .badges { flex: none; justify-content: flex-end; }
+.badge { padding: 3px 7px; border-radius: 7px; background: var(--me-tint); color: var(--me); font-size: 0.65rem; font-weight: 800; }
+.badge.blocked { background: rgba(240, 132, 113, 0.12); color: var(--danger); }
+.active-dot { background: var(--me); flex: none; }
+.admin-note, #sonioxUsage { overflow-wrap: anywhere; }
+.admin-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 12px; }
+.admin-stats > div { display: grid; gap: 3px; min-width: 0; }
+.admin-stats strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.admin-actions { display: grid; gap: 8px; }
+.admin-sheet input, .admin-sheet textarea { width: 100%; min-width: 0; min-height: 48px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--sunken); }
+.admin-sheet textarea { font: inherit; color: inherit; resize: vertical; }
+.admin-sheet button:disabled { opacity: 0.45; }
+.admin-sheet .toast { bottom: calc(24px + var(--safe-bottom)); }
+.admin-sheet .segmented button { min-height: 44px; }
+.admin-sheet button { min-height: 44px; }
+.admin-sheet summary { display: flex; align-items: center; min-height: 44px; cursor: pointer; font-weight: 700; }
+.admin-sheet summary::before { content: "+"; margin-right: 10px; color: var(--me); }
+.admin-sheet details[open] summary::before { content: "−"; }
+.usage-chart { display: flex; align-items: flex-end; gap: 3px; height: 110px; margin: 10px 0; border-bottom: 1px solid var(--line-strong); }
+.chart-bar { flex: 1; min-width: 0; border-radius: 3px 3px 0 0; background: var(--me); }
+.invitation-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 0.9rem; line-height: 1.8; user-select: text; }
 .history-row { display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 14px; border-radius: 14px; }
 .history-row:hover { background: var(--raised); }
 .history-row .option-main { cursor: pointer; }
