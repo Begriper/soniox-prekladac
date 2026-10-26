@@ -17,6 +17,7 @@
 </head>
 <body>
   <svg class="sprite" aria-hidden="true" focusable="false">
+    <symbol id="i-fingerprint" viewBox="0 0 24 24"><path d="M4 9a8 8 0 0 1 16 0M7 10a5 5 0 0 1 10 0c0 5-1 8-3 11M10 11a2 2 0 0 1 4 0c0 4-.5 6-2 9M4 13c0 3-.5 4-1 5M7 13c0 4-1 6-2 7M10 14c0 3-.5 5-1 7M20 13c0 3-.5 5-1 7"/></symbol>
     <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></symbol>
     <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2.5"/></symbol>
     <symbol id="i-swap" viewBox="0 0 24 24"><path d="M7 7h11l-3.5-3.5M17 17H6l3.5 3.5"/></symbol>
@@ -42,14 +43,16 @@
       <h1>Prekladač</h1>
       <p class="login-sub">Živý hlasový preklad pre rozhovor tvárou v tvár.</p>
       <form id="loginForm" class="login-form">
+        <button id="passkeyLoginBtn" class="btn btn-primary btn-block passkey-login" type="button" hidden><svg aria-hidden="true"><use href="#i-fingerprint"/></svg>Prihlásiť sa odtlačkom / Face ID</button>
         <label for="username" class="sr-only">Meno</label>
-        <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="Meno" maxlength="40">
+        <input id="username" name="username" type="text" autocomplete="username webauthn" autocapitalize="none" spellcheck="false" placeholder="Meno" maxlength="40">
         <label for="accessCode" class="sr-only">Heslo</label>
         <input id="accessCode" name="password" type="password" autocomplete="current-password" placeholder="Heslo" required maxlength="512">
         <button class="btn btn-primary btn-block" type="submit">Pokračovať</button>
         <p id="loginStatus" class="login-status" role="status"></p>
       </form>
     </div>
+    <p class="login-credit"><span class="login-credit-label">Vytvoril</span><span class="login-credit-name">František Stolár</span></p>
   </main>
 
   <div id="appShell" class="app" hidden>
@@ -159,9 +162,20 @@
     <section class="group">
       <h3 class="group-title">Účet</h3>
       <div id="usageInfo" class="usage-bars"></div>
+      <button id="passkeyBtn" class="row-btn" type="button" hidden><span class="row-main"><span class="row-label">Prihlásenie odtlačkom / Face ID</span><span id="passkeyState" class="row-value">Vypnuté</span></span><svg><use href="#i-chevron"/></svg></button>
       <button id="adminBtn" class="row-btn" type="button" hidden><span class="row-main"><span class="row-value">Správa používateľov</span></span><svg><use href="#i-chevron"/></svg></button>
       <button id="logoutBtn" class="btn btn-danger btn-block" type="button">Odhlásiť sa</button>
       <p id="catalogNote" class="hint"></p>
+    </section>
+  </dialog>
+
+  <dialog id="passkeySheet" class="sheet" aria-labelledby="passkeyTitle">
+    <div class="sheet-head"><h2 id="passkeyTitle">Odtlačok / Face ID</h2><button class="icon-btn close-sheet" type="button" aria-label="Zavrieť"><svg><use href="#i-close"/></svg></button></div>
+    <section class="group">
+      <button id="passkeyCreateBtn" class="btn btn-primary btn-block" type="button">Zapnúť na tomto zariadení</button>
+      <p class="hint">Odtlačok ani tvár neopustia telefón. Meno a heslo fungujú ďalej.</p>
+      <p id="passkeyStatus" class="hint" role="status"></p>
+      <div id="passkeyList" class="list"></div>
     </section>
   </dialog>
 

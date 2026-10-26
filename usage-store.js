@@ -2,7 +2,7 @@
 const { DatabaseSync } = require("node:sqlite");
 const fs = require("node:fs");
 const path = require("node:path");
-const { createHash } = require("node:crypto");
+const { createHash, randomBytes } = require("node:crypto");
 const FIELDS = ["sessions", "audioBytes", "ttsRequests", "ttsAudioBytes", "ttsChars", "sttSeconds", "previewTtsRequests"];
 const TOTALS = ["sttSeconds", "ttsChars", "ttsRequests", "ttsAudioBytes", "sessions"];
 const emptyTotals = () => Object.fromEntries(TOTALS.map(key => [key, 0]));
@@ -27,6 +27,10 @@ class UsageStore {
       CREATE TABLE IF NOT EXISTS audit_log (at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT, detail_json TEXT);`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS conversation_log (id TEXT PRIMARY KEY, username TEXT NOT NULL, started_at TEXT NOT NULL, duration_ms INTEGER, stt_seconds REAL, tts_chars INTEGER, tts_requests INTEGER, tts_audio_bytes INTEGER, language_a TEXT, language_b TEXT, profile TEXT, latency_median_ms INTEGER, end_code TEXT);
       CREATE INDEX IF NOT EXISTS conversation_log_started ON conversation_log(started_at);`);
+    if (!this.db.prepare("PRAGMA table_info(users)").all().some(c => c.name === "webauthn_user_id")) this.db.exec("ALTER TABLE users ADD COLUMN webauthn_user_id TEXT");
+    for (const row of this.db.prepare("SELECT username FROM users WHERE webauthn_user_id IS NULL").all()) this.db.prepare("UPDATE users SET webauthn_user_id=? WHERE username=?").run(randomBytes(16).toString("base64url"), row.username);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS passkeys (id TEXT PRIMARY KEY, username TEXT NOT NULL, public_key TEXT NOT NULL, alg INTEGER NOT NULL, sign_count INTEGER NOT NULL DEFAULT 0, transports TEXT, label TEXT, created_at TEXT NOT NULL, last_used_at TEXT);
+      CREATE INDEX IF NOT EXISTS passkeys_username ON passkeys(username);`);
     this.statements = new Map();
     if (this.listUsers().length) this.migrateRevokedUsers();
   }
@@ -60,7 +64,7 @@ class UsageStore {
   getUser(username) { return this.statement("SELECT * FROM users WHERE username=?").get(username); }
   listUsers() { return this.statement("SELECT * FROM users ORDER BY username").all(); }
   createUser({ username, role, passwordHash, limits = null, note = null }) {
-    this.statement("INSERT INTO users(username,role,password_hash,created_at,limits_json,note) VALUES(?,?,?,?,?,?)").run(username, role, passwordHash, new Date().toISOString(), this.limitsJson(limits), note);
+    this.statement("INSERT INTO users(username,role,password_hash,created_at,limits_json,note,webauthn_user_id) VALUES(?,?,?,?,?,?,?)").run(username, role, passwordHash, new Date().toISOString(), this.limitsJson(limits), note, randomBytes(16).toString("base64url"));
     return this.getUser(username);
   }
   limitsJson(limits) {
@@ -70,6 +74,9 @@ class UsageStore {
     return JSON.stringify(limits);
   }
   limitsFor(username) { return { ...this.limits, ...JSON.parse(this.getUser(username)?.limits_json || "{}") }; }
+  passkeys(username) { return this.statement("SELECT id,label,created_at,last_used_at FROM passkeys WHERE username=? ORDER BY created_at,id").all(username); }
+  getPasskey(id) { return this.statement("SELECT * FROM passkeys WHERE id=?").get(id); }
+  deletePasskeys(username) { return this.statement("DELETE FROM passkeys WHERE username=?").run(username).changes; }
   setPasswordHash(username, hash) { return this.statement("UPDATE users SET password_hash=? WHERE username=?").run(hash, username).changes > 0; }
   setDisabled(username, disabled) {
     const at = new Date().toISOString();
@@ -80,6 +87,7 @@ class UsageStore {
       const changed = this.statement("UPDATE users SET disabled_at=? WHERE username=? AND (?=0 OR role!='admin' OR disabled_at IS NOT NULL OR (SELECT COUNT(*) FROM users WHERE role='admin' AND disabled_at IS NULL)>1)").run(disabled ? at : null, username, Number(disabled)).changes > 0;
       // Mirrored into the v3.2 table so a rollback on the same volume still refuses the blocked code.
       if (changed && disabled) this.statement("INSERT INTO revoked_users(user,revoked_at) VALUES(?,?) ON CONFLICT(user) DO NOTHING").run(username, at);
+      if (changed && disabled) this.deletePasskeys(username);
       if (changed && !disabled) this.statement("DELETE FROM revoked_users WHERE user=?").run(username);
       this.db.exec("RELEASE set_disabled");
       return changed;
@@ -102,6 +110,7 @@ class UsageStore {
     this.statement("DELETE FROM usage WHERE user=?").run(username);
     this.statement("UPDATE conversation_log SET username=? WHERE username=?").run(anonymous, username);
     this.deleteUserSessions(username);
+    this.deletePasskeys(username);
     // A leftover legacy revocation would block a future account of the same name on the next start.
     this.statement("DELETE FROM revoked_users WHERE user=?").run(username);
     this.statement("DELETE FROM users WHERE username=?").run(username);
@@ -163,7 +172,8 @@ class UsageStore {
   // Runs on every start: revocations made by an older release (for example after a rollback) are applied
   // again; unblocking removes the legacy row, so this never undoes an unblock.
   migrateRevokedUsers() {
-    this.db.exec(`DELETE FROM auth_sessions WHERE username IN (SELECT username FROM users WHERE disabled_at IS NULL AND username IN (SELECT user FROM revoked_users));
+    this.db.exec(`DELETE FROM passkeys WHERE username IN (SELECT user FROM revoked_users);
+      DELETE FROM auth_sessions WHERE username IN (SELECT username FROM users WHERE disabled_at IS NULL AND username IN (SELECT user FROM revoked_users));
       UPDATE users SET disabled_at=(SELECT revoked_at FROM revoked_users WHERE user=users.username) WHERE disabled_at IS NULL AND username IN (SELECT user FROM revoked_users);`);
   }
   clearLegacyRevocation(username) { this.statement("DELETE FROM revoked_users WHERE user=?").run(username); }

@@ -35,7 +35,7 @@ function installAdminApi(app, { store, session, route, endUser, conversations, o
     username: u.username, role: u.role, disabled: Boolean(u.disabled_at), created_at: u.created_at, last_login_at: u.last_login_at, note: u.note,
     limits_override: JSON.parse(u.limits_json || "null"), limits_effective: store.limitsFor(u.username), today: store.read(u.username), month: store.monthUsage(u.username),
     active: [...conversations.values()].some(c => c.auth.username === u.username), sessions: store.userSessions(u.username),
-    owner: u.username === ownerUsername, revoked: Boolean(u.disabled_at),
+    owner: u.username === ownerUsername, revoked: Boolean(u.disabled_at), passkeys: store.passkeys(u.username).length,
   })) }));
   app.post("/api/admin/users", route(async (req, res) => {
     if (!body(req, ["username", "role", "password", "limits", "note"])) return invalid(res);
@@ -56,9 +56,15 @@ function installAdminApi(app, { store, session, route, endUser, conversations, o
     const pw = req.body.password ?? generatePassword(), hash = await hashPassword(pw);
     req.auth = session(req); if (req.auth?.role !== "admin") return denied(res);
     if (store.getUser(user.username)?.created_at !== user.created_at) return invalid(res);
-    mutation(req, "reset_password", user.username, null, () => { store.setPasswordHash(user.username, hash); store.deleteUserSessions(user.username); }, () => endUser(user.username));
+    mutation(req, "reset_password", user.username, { passkeys_deleted: store.passkeys(user.username).length }, () => { store.setPasswordHash(user.username, hash); store.deletePasskeys(user.username); store.deleteUserSessions(user.username); }, () => endUser(user.username));
     res.json({ ok: true, username: user.username, password: pw });
   }));
+  app.post("/api/admin/users/:username/passkeys/delete", (req, res) => {
+    if (!body(req, [])) return invalid(res);
+    const user = target(req, res); if (!user) return;
+    mutation(req, "delete_passkeys", user.username, { passkeys_deleted: store.passkeys(user.username).length }, () => store.deletePasskeys(user.username));
+    res.json({ ok: true });
+  });
   app.post("/api/admin/users/:username/limits", (req, res) => {
     if (!body(req, ["limits"]) || !limits(req.body.limits)) return invalid(res);
     const user = target(req, res); if (!user) return;
@@ -79,7 +85,7 @@ function installAdminApi(app, { store, session, route, endUser, conversations, o
     if ((disable || remove) && (user.username === req.auth.username || (user.role === "admin" && !user.disabled_at && store.countAdmins() <= 1))) return invalid(res);
     // A deleted user's live conversation ends first so its final log row is anonymized with the history.
     if (remove) endUser(user.username);
-    mutation(req, (disable ? "disable" : action) + "_user", user.username, null, () => {
+    mutation(req, (disable ? "disable" : action) + "_user", user.username, disable || remove ? { passkeys_deleted: store.passkeys(user.username).length } : null, () => {
       if (disable || action === "logout") store.deleteUserSessions(user.username);
       if (disable || action === "enable") store.setDisabled(user.username, disable);
       if (remove) store.deleteUser(user.username);

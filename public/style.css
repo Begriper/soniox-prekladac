@@ -94,7 +94,10 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 }
 
 /* Login */
-.login { min-height: 100dvh; display: grid; place-items: center; padding: 24px 20px calc(24px + var(--safe-bottom)); }
+.login { min-height: 100dvh; display: grid; grid-template-rows: 1fr auto; place-items: center; padding: 24px 20px calc(24px + var(--safe-bottom)); }
+.login-credit { display: grid; gap: 2px; margin: 24px 0 0; text-align: center; }
+.login-credit-label { color: var(--subtle); font-size: 0.7rem; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase; }
+.login-credit-name { color: var(--muted); font-size: 0.95rem; font-weight: 700; letter-spacing: 0.01em; }
 .login-card { width: 100%; max-width: 380px; text-align: center; }
 .logo { display: inline-grid; place-items: center; width: 76px; height: 76px; border-radius: 24px; background: linear-gradient(145deg, #173038, #10202a); border: 1px solid var(--line-strong); box-shadow: var(--shadow); }
 .logo svg { width: 46px; height: 46px; stroke: var(--me); stroke-width: 4.5; }
@@ -278,6 +281,13 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .chip { min-height: 36px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 999px; background: transparent; color: var(--muted); font-size: 0.85rem; font-weight: 700; white-space: nowrap; }
 .chip[aria-checked="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
 /* Account and administration */
+.passkey-login { gap: 10px; white-space: normal; padding: 12px; }
+.passkey-login svg { flex: none; }
+#passkeySheet button { min-height: 44px; }
+#passkeyList { padding: 0; }
+#passkeyList .option { min-width: 0; gap: 10px; }
+#passkeyList .option-main { min-width: 0; overflow-wrap: anywhere; }
+#passkeyList .btn { flex: none; padding: 0 12px; }
 .usage-bars { display: grid; gap: 12px; min-width: 0; }
 .account-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .usage-bar { display: grid; gap: 6px; width: 100%; min-width: 0; }

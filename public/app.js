@@ -49,9 +49,9 @@ function saveSettings() {
 async function api(url, options = {}) {
   const response = await fetch(url, { credentials: "same-origin", signal: AbortSignal.timeout(8000), ...options, headers: { "Content-Type": "application/json", ...options.headers } });
   if (!response.ok) {
-    let message = "Operácia zlyhala."; try { message = (await response.json()).error || message; } catch {}
+    let message = "Operácia zlyhala.", code; try { const data = await response.json(); message = data.error || message; code = data.code; } catch {}
     if (response.status === 401 && user) await signOut(false);
-    throw new Error(message);
+    const failure = new Error(message); failure.code = code; throw failure;
   }
   return response.json();
 }
@@ -188,7 +188,7 @@ function ensureVoices() {
 /* ---------- sheets: administration ---------- */
 let adminRole = false, adminUsers = [], selectedUser = "", adminVersion = 0, userVersion = 0, adminBusy = false, newRole = "user", selfPasswordReset = false;
 const LIMIT_FIELDS = [["limitMinutes", "sttSeconds", 60], ["limitChars", "ttsChars", 1], ["limitSessions", "sessions", 1], ["limitMonth", "sttSecondsMonth", 60]];
-const AUDIT_LABELS = { create_user: "Vytvorenie účtu", reset_password: "Nové heslo", set_limits: "Zmena limitov", set_role: "Zmena roly", disable_user: "Zablokovanie", enable_user: "Odblokovanie", logout_user: "Odhlásenie zariadení", delete_user: "Zmazanie účtu", bootstrap_import: "Import účtu", break_glass: "Núdzové prihlásenie" };
+const AUDIT_LABELS = { create_user: "Vytvorenie účtu", reset_password: "Nové heslo", set_limits: "Zmena limitov", set_role: "Zmena roly", disable_user: "Zablokovanie", enable_user: "Odblokovanie", logout_user: "Odhlásenie zariadení", delete_user: "Zmazanie účtu", bootstrap_import: "Import účtu", break_glass: "Núdzové prihlásenie", register_passkey: "Pridanie prístupového kľúča", delete_passkey: "Odstránenie prístupového kľúča", delete_passkeys: "Odobratie prístupových kľúčov", passkey_login: "Prihlásenie odtlačkom / Face ID" };
 function number(value, digits = 1) { return Number(value || 0).toLocaleString("sk", { maximumFractionDigits: digits }); }
 function minutes(data) { return number((data?.sttSeconds || 0) / 60); }
 function voiceMinutes(data) { return number((data?.ttsAudioBytes || 0) / 48000 / 60); }
@@ -237,7 +237,7 @@ async function refreshAdmin() {
     for (const row of adminUsers) {
       const card = el("button", "option user-card"); card.type = "button";
       const head = el("div", "user-card-head"); head.append(el("strong", "option-title", row.username), badges(row));
-      card.append(head, usageBar("Dnes · min", (row.today.sttSeconds || 0) / 60, row.limits_effective.sttSeconds / 60), el("span", "hint", "Prihlásenie " + relative(row.last_login_at)));
+      card.append(head, usageBar("Dnes · min", (row.today.sttSeconds || 0) / 60, row.limits_effective.sttSeconds / 60), el("span", "hint", "Prihlásenie " + relative(row.last_login_at) + " · prístupové kľúče: " + (row.passkeys || 0)));
       card.addEventListener("click", () => { void openUser(row.username).catch(adminError); }); $("adminUsers").append(card);
     }
     $("adminUsage").replaceChildren(stats(usage.totals, true));
@@ -279,6 +279,7 @@ function renderUser(row) {
   };
   action("Nové heslo", "password", {}, "Vytvoriť nové heslo pre " + row.username + " a odhlásiť všetky zariadenia?");
   action("Odhlásiť všade", "logout", {}, "Odhlásiť všetky zariadenia používateľa " + row.username + "?");
+  if (row.passkeys) action("Odobrať prístupové kľúče (" + row.passkeys + ")", "passkeys/delete", {}, "Odobrať všetky prístupové kľúče používateľa " + row.username + "?");
   if (row.username !== user) {
     action(row.disabled ? "Odblokovať" : "Zablokovať", row.disabled ? "enable" : "disable", {}, row.disabled ? "" : "Zablokovať používateľa " + row.username + " a ukončiť jeho rozhovor?", !row.disabled);
     action(row.role === "admin" ? "Používateľ" : "Admin", "role", { role: row.role === "admin" ? "user" : "admin" }, "Zmeniť rolu používateľa " + row.username + " na " + (row.role === "admin" ? "Používateľ" : "Admin") + "?");
@@ -328,6 +329,7 @@ async function mutateUser(username, path, body) {
     if (username === user && (path === "password" || path === "logout")) { resumePending = false; disconnect(); }
     const data = await api("/api/admin/users/" + encodeURIComponent(username) + "/" + path, { method: "POST", body: JSON.stringify(body) });
     if (owner !== user) return;
+    if (["passkeys/delete", "password", "disable", "revoke", "delete"].includes(path)) { const ids = devicePasskeys(); delete ids[username]; saveDevicePasskeys(ids); }
     if (path === "password" && selectedUser === username && version === userVersion && $("userSheet").open) invitation("userInvitation", data);
     if (username === user && (path === "password" || path === "logout")) {
       // Our cookie is now invalid; retain a reset invitation only until this sheet closes.
@@ -359,10 +361,110 @@ async function createUser(event) {
 }
 
 
+/* ---------- passkeys ---------- */
+let passkeyAvailable = false, passkeyAbort = null, passkeyBusy = false, passwordBusy = false;
+const fromBase64url = value => Uint8Array.from(atob(value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - value.length % 4) % 4)), c => c.charCodeAt(0));
+const toBase64url = value => btoa(String.fromCharCode(...new Uint8Array(value))).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+const passkeyError = err => err.name === "Error" ? err.message : "Operácia sa nepodarila. Skús znova alebo použi meno a heslo.";
+function devicePasskeys() {
+  try { const ids = JSON.parse(store.get("passkeyIds", "{}")); return Object.assign(Object.create(null), Object.fromEntries(Object.entries(ids).filter(([, list]) => Array.isArray(list) && list.every(id => typeof id === "string")))); } catch { return Object.create(null); }
+}
+function saveDevicePasskeys(ids) {
+  store.set("passkeyIds", JSON.stringify(ids));
+  store.set("passkey", Object.values(ids).some(list => Array.isArray(list) && list.length) ? "1" : "0");
+  renderPasskeyState();
+}
+function renderPasskeyState() {
+  $("passkeyBtn").hidden = !passkeyAvailable;
+  $("passkeyState").textContent = (devicePasskeys()[user] || []).length ? "Zapnuté na tomto zariadení" : "Vypnuté";
+  $("passkeyLoginBtn").hidden = !passkeyAvailable || store.get("passkey", "0") !== "1";
+}
+function abortPasskeyLogin() { passkeyAbort?.abort(); passkeyAbort = null; }
+async function initPasskeys() {
+  try { passkeyAvailable = Boolean(window.PublicKeyCredential) && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable(); } catch { passkeyAvailable = false; }
+  renderPasskeyState();
+  if (passkeyAvailable && !user) void conditionalPasskeyLogin();
+}
+async function conditionalPasskeyLogin() {
+  try {
+    if (user || passwordBusy || !passkeyAvailable || store.get("passkey", "0") !== "1" || !await PublicKeyCredential.isConditionalMediationAvailable?.()) return;
+    if (!user && !passwordBusy && !passkeyAbort) void passkeyLogin(true);
+  } catch { /* Password login stays available. */ }
+}
+async function passkeyLogin(conditional = false) {
+  abortPasskeyLogin();
+  const controller = new AbortController(); passkeyAbort = controller;
+  $("passkeyLoginBtn").disabled = !conditional;
+  if (!conditional) $("loginStatus").textContent = "";
+  try {
+    const options = await api("/api/passkeys/login/options", { method: "POST", body: "{}", signal: controller.signal });
+    if (controller.signal.aborted || user) return;
+    options.challenge = fromBase64url(options.challenge);
+    const credential = await navigator.credentials.get({ publicKey: options, signal: controller.signal, ...(conditional ? { mediation: "conditional" } : {}) });
+    if (!credential || controller.signal.aborted || user) return;
+    const response = credential.response;
+    const data = await api("/api/passkeys/login", { method: "POST", signal: controller.signal, body: JSON.stringify({ id: credential.id, rawId: toBase64url(credential.rawId), type: credential.type,
+      response: { clientDataJSON: toBase64url(response.clientDataJSON), authenticatorData: toBase64url(response.authenticatorData), signature: toBase64url(response.signature), userHandle: response.userHandle ? toBase64url(response.userHandle) : null } }) });
+    if (!controller.signal.aborted && !user) await showApp(data);
+  } catch (err) {
+    if (err.code === "unknown_credential") { saveDevicePasskeys({}); }
+    if (!controller.signal.aborted && (!conditional || err.code)) $("loginStatus").textContent = "Prihlásenie sa nepodarilo. Skús znova alebo použi meno a heslo.";
+  } finally {
+    if (passkeyAbort === controller) { passkeyAbort = null; $("passkeyLoginBtn").disabled = false; }
+  }
+}
+async function loadPasskeys() {
+  const owner = user, data = await api("/api/passkeys");
+  if (owner !== user || !$("passkeySheet").open) return;
+  const ids = devicePasskeys();
+  if (Array.isArray(ids[owner])) { ids[owner] = ids[owner].filter(id => data.passkeys.some(p => p.id === id)); saveDevicePasskeys(ids); }
+  $("passkeyList").replaceChildren();
+  for (const key of data.passkeys) {
+    const row = detailRow(key.label || "Zariadenie", "Pridané " + new Date(key.created_at).toLocaleDateString("sk") + " · použité " + relative(key.last_used_at));
+    const remove = el("button", "btn btn-ghost", "Odstrániť"); remove.type = "button"; remove.disabled = passkeyBusy;
+    remove.addEventListener("click", async () => {
+      if (passkeyBusy || owner !== user) return;
+      remove.disabled = true;
+      try {
+        await api("/api/passkeys/" + encodeURIComponent(key.id) + "/delete", { method: "POST", body: "{}" });
+        const current = devicePasskeys();
+        if (Array.isArray(current[owner])) current[owner] = current[owner].filter(id => id !== key.id);
+        saveDevicePasskeys(current); if (user === owner) await loadPasskeys();
+      } catch (err) { if (owner === user) $("passkeyStatus").textContent = passkeyError(err); }
+      finally { remove.disabled = false; }
+    });
+    row.append(remove); $("passkeyList").append(row);
+  }
+  if (!data.passkeys.length) $("passkeyList").append(el("p", "hint", "Žiadne prístupové kľúče."));
+}
+async function createPasskey() {
+  if (passkeyBusy) return;
+  const owner = user; passkeyBusy = true; $("passkeyCreateBtn").disabled = true; $("passkeyStatus").textContent = "";
+  try {
+    const options = await api("/api/passkeys/register/options", { method: "POST", body: "{}" });
+    if (owner !== user) return;
+    options.challenge = fromBase64url(options.challenge); options.user.id = fromBase64url(options.user.id);
+    options.excludeCredentials = options.excludeCredentials.map(c => ({ ...c, id: fromBase64url(c.id) }));
+    const credential = await navigator.credentials.create({ publicKey: options });
+    if (!credential || owner !== user) return;
+    const response = credential.response;
+    if (!response.getPublicKey || !response.getPublicKeyAlgorithm || !response.getAuthenticatorData || !response.getPublicKey()) throw new Error("Prehliadač neposkytuje verejný kľúč. Aktualizuj ho alebo použi meno a heslo.");
+    const label = /iPhone|iPad/.test(navigator.userAgent) ? "iPhone / iPad" : /Android/.test(navigator.userAgent) ? "Android" : "Toto zariadenie";
+    await api("/api/passkeys/register", { method: "POST", body: JSON.stringify({ id: credential.id, rawId: toBase64url(credential.rawId), type: credential.type, label,
+      response: { clientDataJSON: toBase64url(response.clientDataJSON), attestationObject: toBase64url(response.attestationObject), publicKey: toBase64url(response.getPublicKey()), publicKeyAlgorithm: response.getPublicKeyAlgorithm(), authenticatorData: toBase64url(response.getAuthenticatorData()), transports: response.getTransports?.() || [] } }) });
+    const ids = devicePasskeys(); ids[owner] = [...new Set([...(ids[owner] || []), credential.id])]; saveDevicePasskeys(ids);
+    if (owner === user) { $("passkeyStatus").textContent = "Zapnuté na tomto zariadení."; await loadPasskeys(); }
+  } catch (err) {
+    if (owner === user) $("passkeyStatus").textContent = err.name === "NotAllowedError" || err.name === "AbortError" ? "Pridanie sa nedokončilo. Skús znova." : passkeyError(err);
+  } finally { passkeyBusy = false; $("passkeyCreateBtn").disabled = false; }
+}
+
 /* ---------- session ---------- */
 async function showApp(session) {
+  abortPasskeyLogin(); $("passkeyLoginBtn").disabled = false;
   user = session.username; $("loginShell").hidden = true; $("appShell").hidden = false; $("accessCode").value = "";
   adminRole = session.role === "admin"; $("adminBtn").hidden = !adminRole;
+  renderPasskeyState();
   const owner = user;
   const [languageData, voiceData] = await Promise.all([api("/api/languages"), api("/api/voices")]);
   if (user !== owner) return;
@@ -393,6 +495,7 @@ async function signOut(callServer = true) {
   adminVersion++; userVersion++; adminRole = false; adminUsers = []; selectedUser = ""; $("adminBtn").hidden = true;
   for (const id of ["adminUsers", "adminUsage", "adminAudit", "sonioxUsage", "userDevices", "userChart", "userUsage", "userActions", "userBadges", "userNote", "userTitle"]) $(id).replaceChildren();
   user = null; $("loginShell").hidden = false; $("appShell").hidden = true; $("accessCode").value = "";
+  $("passkeyList").replaceChildren(); $("passkeyStatus").textContent = ""; renderPasskeyState(); void conditionalPasskeyLogin();
 }
 
 /* ---------- audio playback ---------- */
@@ -867,12 +970,19 @@ for (const side of ["A", "B"]) {
 /* ---------- wiring ---------- */
 $("loginForm").addEventListener("submit", async event => {
   event.preventDefault(); $("loginStatus").textContent = "";
-  const button = event.currentTarget.querySelector("button"); button.disabled = true;
+  abortPasskeyLogin(); passwordBusy = true; $("passkeyLoginBtn").disabled = true;
+  const button = event.currentTarget.querySelector('button[type="submit"]'); button.disabled = true;
   const username = $("username").value.trim(), password = $("accessCode").value;
   try { await showApp(await api("/api/login", { method: "POST", body: JSON.stringify(username ? { username, password } : { code: password.trim() }) })); }
   catch (err) { $("loginStatus").textContent = err.message; }
-  finally { button.disabled = false; }
+  finally { button.disabled = false; passwordBusy = false; $("passkeyLoginBtn").disabled = false; }
 });
+$("passkeyLoginBtn").addEventListener("click", () => { if (!passwordBusy) void passkeyLogin(); });
+$("passkeyBtn").addEventListener("click", () => {
+  $("settingsSheet").close(); $("passkeyStatus").textContent = ""; openSheet("passkeySheet");
+  void loadPasskeys().catch(err => { $("passkeyStatus").textContent = passkeyError(err); });
+});
+$("passkeyCreateBtn").addEventListener("click", () => void createPasskey());
 $("startBtn").addEventListener("click", () => (running ? pause() : start()).catch(e => error(e.message)));
 $("resumeBtn").addEventListener("click", () => start().catch(e => error(e.message)));
 $("pttEndBtn").addEventListener("click", () => pause().catch(e => error(e.message)));
@@ -971,5 +1081,5 @@ setInterval(async () => {
     controls();
   } catch {}
 }, 600000);
-api("/api/session").then(showApp).catch(() => { $("loginShell").hidden = false; $("appShell").hidden = true; });
+api("/api/session").then(showApp).catch(() => { $("loginShell").hidden = false; $("appShell").hidden = true; }).finally(() => { void initPasskeys(); });
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
