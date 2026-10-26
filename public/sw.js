@@ -1,11 +1,11 @@
 'use strict';
-const CACHE = 'translator-shell-3.2.1';
+const CACHE = 'translator-shell-3.3.0';
 const SHELL = [
   '/', '/index.html',
-  '/style.css?v=3.2.1', '/app.js?v=3.2.1', '/history.js?v=3.2.1',
-  '/audio-capture-worklet.js?v=3.2.1', '/manifest.webmanifest?v=3.2.1',
-  '/icon.svg?v=3.2.1', '/icon-180.png?v=3.2.1', '/icon-192.png?v=3.2.1',
-  '/icon-512.png?v=3.2.1', '/icon-maskable-512.png?v=3.2.1',
+  '/style.css?v=3.3.0', '/app.js?v=3.3.0', '/history.js?v=3.3.0',
+  '/audio-capture-worklet.js?v=3.3.0', '/manifest.webmanifest?v=3.3.0',
+  '/icon.svg?v=3.3.0', '/icon-180.png?v=3.3.0', '/icon-192.png?v=3.3.0',
+  '/icon-512.png?v=3.3.0', '/icon-maskable-512.png?v=3.3.0',
   '/fonts/Manrope-variable.ttf'
 ];
 self.addEventListener('install', event => event.waitUntil((async () => {
