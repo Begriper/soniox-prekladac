@@ -1,6 +1,6 @@
-# Soniox prekladač — 3.2.0
+# Soniox prekladač — 3.6.x
 
-Súkromná rodinná webová aplikácia: obojsmerný hovorený preklad na jednom telefóne. Vanilla HTML/CSS/JavaScript, Express, Soniox STT v5 a TTS v2. Implementácia je pripravená na lokálne overenie; produkcia sa v tejto úlohe nenasadzovala.
+Súkromná rodinná webová aplikácia: obojsmerný hovorený preklad na jednom telefóne. Vanilla HTML/CSS/JavaScript, Express, Soniox STT v6 a TTS v2. Implementácia je pripravená na lokálne overenie; produkcia sa v tejto úlohe nenasadzovala.
 
 ## Spustenie
 
@@ -34,6 +34,8 @@ Pri prvom štarte s prázdnou tabuľkou `users` sa `APP_ACCESS_CODES` importujú
 
 `APP_ACCESS_CODES` zostáva povinné. Kód vlastníka z env je núdzový vstup (break-glass): vždy obnoví rolu admina a odblokuje účet aj po zmene hesla v DB. Chráň ho ako administrátorské heslo. Chýbajúci účet vlastníka sa obnoví; fyzicky poškodený alebo neprístupný SQLite súbor treba najprv obnoviť zo zálohy. Zmeny ostatných env kódov už existujúce DB heslá nemenia.
 
+Server zapisuje na štandardný výstup (`fly logs`) jeden JSON riadok na koniec každého rozhovoru (trvanie, kód ukončenia, spotreba, latencia, chyba Sonioxu) bez textu rozhovoru a s neodvoditeľne skráteným identifikátorom používateľa; vypne sa `LOG_EVENTS=false`. Limit `MAX_TTS_REQUESTS_PER_SESSION` počíta vyslovené výpovede v jednom rozhovore; po jeho dosiahnutí zostane preklad v texte a hlásenie sa zobrazí iba raz.
+
 API kľúč zostáva na serveri. Session cookie je podpísaná, HttpOnly, SameSite=Strict a v produkcii Secure. Odhlásenie/expirácia rušia príslušné WebSockety a syntézu. Origin sa overuje presne. X-Forwarded-For sa nepoužíva; TRUST_FLY_PROXY=true je určené iba pre Fly Proxy bez priameho verejného prístupu na aplikačný port.
 
 Katalógy sa pri používaní obnovujú najviac raz za 10 minút pre presný STT/TTS model; pri výpadku zostáva posledný úspešný katalóg vrátane stavu zastarania. Technické nastavenia latencie sú na serveri. Skriptové obmedzenia hlasu sa zobrazujú pri výbere jazyka.
@@ -50,6 +52,11 @@ Použi **jednu aplikačnú Machine**: nezávislé volumes na viacerých Machines
 - [Pôvodná dokumentácia pred modernizáciou — historický stav](docs/README-before-modernization.md)
 
 Staré nastavenia MAX_TTS_QUEUE, MAX_TTS_CHARS, MAX_TEXT_CHARS, MAX_WS_MESSAGE_KB, TTS_PLAYBACK_TIMEOUT_SECONDS a pomocné timeout premenné už nemenia pevné bezpečnostné limity. Aktuálne podporované hodnoty sú v .env.example. Zmena modelu je centrálne v runtime-models.js.
+
+## Verzia 3.6
+
+- Model `stt-rt-v6` (Soniox ruší `stt-rt-v5` 15. 12. 2026), hlas pripravený vopred v režime Reproduktor, obnova rozpoznávania v tom istom rozhovore, odolnejší klient na iPhone (obnova zvuku, prepis prežije odhlásenie, bezpečné aktualizácie), prísnejšie limity prihlásenia a nákladov, záloha databázy (`backup-db.js`), väčšie písmo a prístupnosť.
+- Podrobný zoznam a čo ostáva overiť: [implementácia auditu](docs/implementacia-2026-11.md).
 
 ## Verzia 3.2
 

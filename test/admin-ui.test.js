@@ -21,7 +21,10 @@ test("admin sheets have accessible dialog titles", () => {
 // Exercise the actual client helpers with a minimal DOM, without a browser dependency.
 function client() {
   class Node {
-    constructor() { this.children = []; this.attributes = {}; this.style = {}; this.events = {}; this.value = ""; this.hidden = false; this.open = false; }
+    constructor() {
+      this.children = []; this.attributes = {}; this.style = {}; this.events = {}; this.value = ""; this.hidden = false; this.open = false;
+      this.classes = new Set(); this.classList = { toggle: (key, on) => on ? this.classes.add(key) : this.classes.delete(key), add: key => this.classes.add(key), remove: key => this.classes.delete(key) };
+    }
     set textContent(value) { this.text = String(value); this.children = []; }
     get textContent() { return (this.text || "") + this.children.map(n => n.textContent).join(""); }
     append(...nodes) { this.children.push(...nodes); }
@@ -79,12 +82,15 @@ function passkeyClient() {
   c.run('PublicKeyCredential = window.PublicKeyCredential = { isUserVerifyingPlatformAuthenticatorAvailable: async () => true, isConditionalMediationAvailable: async () => false };');
   return { ...c, storage };
 }
-test("passkey controls require platform support and a local registration flag", async () => {
+test("passkey login is offered wherever the platform supports it and is primary only after a local registration", async () => {
   const c = passkeyClient();
   await c.run("initPasskeys()");
-  assert.equal(c.get("passkeyBtn").hidden, false); assert.equal(c.get("passkeyLoginBtn").hidden, true);
+  // A passkey synced from another device has no local flag; the button must still be there.
+  assert.equal(c.get("passkeyBtn").hidden, false); assert.equal(c.get("passkeyLoginBtn").hidden, false);
+  assert.equal(c.get("passkeyLoginBtn").classes.has("btn-primary"), false); assert.equal(c.get("passkeyLoginBtn").classes.has("btn-ghost"), true);
   c.run('saveDevicePasskeys({ owner: ["credential"] })');
   assert.equal(c.get("passkeyState").textContent, "Zapnuté na tomto zariadení"); assert.equal(c.get("passkeyLoginBtn").hidden, false);
+  assert.equal(c.get("passkeyLoginBtn").classes.has("btn-primary"), true);
   c.run('user = "family"; renderPasskeyState()'); assert.equal(c.get("passkeyState").textContent, "Vypnuté");
   c.run('PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = async () => false;');
   await c.run("initPasskeys()"); assert.equal(c.get("passkeyBtn").hidden, true); assert.equal(c.get("passkeyLoginBtn").hidden, true);
@@ -99,7 +105,7 @@ test("passkey list uses text nodes and removing the last local key clears its de
   c.run('passkeyAvailable = true; saveDevicePasskeys({ owner: ["local-key"] }); globalThis.keys = [{ id: "local-key", label: "<img src=x>", created_at: "2026-10-26", last_used_at: null }]; api = async (url, options) => { if (options) { keys = []; return { ok: true }; } return { passkeys: keys }; };');
   await c.run("loadPasskeys()"); assert.match(c.get("passkeyList").textContent, /<img src=x>/);
   const remove = c.get("passkeyList").children[0].children.at(-1); await remove.events.click();
-  assert.equal(c.storage.get("translator.passkey"), "0"); assert.equal(c.get("passkeyLoginBtn").hidden, true);
+  assert.equal(c.storage.get("translator.passkey"), "0"); assert.equal(c.get("passkeyLoginBtn").classes.has("btn-primary"), false);
   assert.equal(c.get("passkeyState").textContent, "Vypnuté");
 });
 test("conditional get is aborted before explicit passkey get and successful login uses showApp", async () => {
@@ -116,7 +122,7 @@ test("unknown credential clears the local flag and leaves a short password fallb
   const c = passkeyClient();
   c.run('user = null; passkeyAvailable = true; saveDevicePasskeys({ owner: ["a"] }); api = async () => { const err = new Error("unknown"); err.code = "unknown_credential"; throw err; };');
   await c.run("passkeyLogin()");
-  assert.equal(c.storage.get("translator.passkey"), "0"); assert.equal(c.get("passkeyLoginBtn").hidden, true);
+  assert.equal(c.storage.get("translator.passkey"), "0"); assert.equal(c.get("passkeyLoginBtn").classes.has("btn-primary"), false);
   assert.match(c.get("loginStatus").textContent, /meno a heslo/); assert.equal(c.get("passkeyLoginBtn").disabled, false);
 });
 test("conditional mediation is requested only on a registered device and respects password submission", async () => {
@@ -128,7 +134,7 @@ test("conditional mediation is requested only on a registered device and respect
   c.run('passwordBusy = false;'); await c.run("conditionalPasskeyLogin()"); assert.equal(c.run("calls"), 1);
 });
 test("registration converts options, posts browser public key accessors and remembers this device", async () => {
-  const c = passkeyClient(), bytes = Uint8Array.of(97).buffer;
+  const c = passkeyClient(), bytes = Uint8Array.of(97).buffer; c.get("passkeyPassword").value = "account-password";
   c.context.credential = { id: "YQ", rawId: bytes, type: "public-key", response: { clientDataJSON: bytes, attestationObject: bytes,
     getPublicKey: () => bytes, getPublicKeyAlgorithm: () => -7, getAuthenticatorData: () => bytes, getTransports: () => ["internal"] } };
   c.run('navigator.credentials = { create: async options => { globalThis.creation = options.publicKey; return credential; } }; api = async (url, options) => { if (url.endsWith("options")) return { challenge: "YQ", user: { id: "Yg" }, excludeCredentials: [{ type: "public-key", id: "Yw" }] }; globalThis.registration = JSON.parse(options.body); return { ok: true }; }; loadPasskeys = async () => {};');
@@ -140,7 +146,7 @@ test("registration converts options, posts browser public key accessors and reme
   assert.equal(c.get("passkeyCreateBtn").disabled, false);
 });
 test("unsupported registration accessors give a clear message and never set the device flag", async () => {
-  const c = passkeyClient();
+  const c = passkeyClient(); c.get("passkeyPassword").value = "account-password";
   c.run('navigator.credentials = { create: async () => ({ response: {} }) }; api = async () => ({ challenge: "YQ", user: { id: "Yg" }, excludeCredentials: [] });');
   await c.run("createPasskey()"); assert.match(c.get("passkeyStatus").textContent, /Prehliadač neposkytuje verejný kľúč/);
   assert.equal(c.storage.get("translator.passkey"), undefined); assert.equal(c.get("passkeyCreateBtn").disabled, false);

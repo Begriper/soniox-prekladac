@@ -123,13 +123,23 @@ class SonioxTtsWebSocket {
         if (isNew) this.sendJson(this.createStreamConfig(stream));
         options.onStart?.({ streamId: stream.streamId, format: TTS_AUDIO_FORMAT, sampleRate: TTS_SAMPLE_RATE });
         if (options.parts) {
+          // The provider may hold audio until more of the sentence arrives: the deadline counts from the last text,
+          // and the end of the text gets the full deadline too (it often follows a pause that used most of it).
+          const rearm = () => {
+            clearTimeout(stream.waitTimer);
+            stream.waitTimer = stream.audioStarted
+              ? setTimeout(() => this.fail(stream, new TtsWebSocketError("Audio stalled", { audioStarted: true })), this.idleAudioMs)
+              : setTimeout(timeout, this.firstAudioMs);
+          };
           void (async () => {
             try {
               for await (const part of options.parts) {
                 if (!this.streams.has(stream.streamId)) return;
-                if (part) this.sendJson({ stream_id: stream.streamId, text: String(part), text_end: false });
+                if (!part) continue;
+                this.sendJson({ stream_id: stream.streamId, text: String(part), text_end: false });
+                rearm();
               }
-              if (this.streams.has(stream.streamId)) this.sendJson({ stream_id: stream.streamId, text: "", text_end: true });
+              if (this.streams.has(stream.streamId)) { this.sendJson({ stream_id: stream.streamId, text: "", text_end: true }); rearm(); }
             } catch (err) { this.fail(stream, err); }
           })();
         } else this.sendJson({ stream_id: stream.streamId, text: String(options.text || ""), text_end: true });

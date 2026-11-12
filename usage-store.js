@@ -15,11 +15,11 @@ const median = values => {
 // Reservations are committed before contacting the provider. Failed requests remain
 // reserved: the provider may already have billed them. No transcript/audio is stored.
 class UsageStore {
-  constructor(filename, limits = {}) {
+  constructor(filename, limits = {}, globalLimits = {}) {
     if (filename !== ":memory:") fs.mkdirSync(path.dirname(filename), { recursive: true });
     this.db = new DatabaseSync(filename);
-    this.limits = limits;
-    this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000; CREATE TABLE IF NOT EXISTS usage (user TEXT NOT NULL, day TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(user,day)); CREATE TABLE IF NOT EXISTS catalogs (kind TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS revoked_users (user TEXT PRIMARY KEY, revoked_at TEXT NOT NULL);");
+    this.limits = limits; this.globalLimits = globalLimits;
+    this.db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=3000; CREATE TABLE IF NOT EXISTS usage (user TEXT NOT NULL, day TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(user,day)); CREATE TABLE IF NOT EXISTS catalogs (kind TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS revoked_users (user TEXT PRIMARY KEY, revoked_at TEXT NOT NULL);");
     this.db.exec(`CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, role TEXT NOT NULL CHECK(role IN ('admin','user')), password_hash TEXT NOT NULL, created_at TEXT NOT NULL, disabled_at TEXT, last_login_at TEXT, limits_json TEXT, note TEXT);
       CREATE TABLE IF NOT EXISTS auth_sessions (id_hash TEXT PRIMARY KEY, username TEXT NOT NULL, created_at TEXT NOT NULL, expires_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, device TEXT);
       CREATE INDEX IF NOT EXISTS auth_sessions_username ON auth_sessions(username);
@@ -40,7 +40,9 @@ class UsageStore {
     const row = this.db.prepare("SELECT data FROM usage WHERE user=? AND day=?").get(user, day);
     return { ...Object.fromEntries(FIELDS.map(f => [f, 0])), ...(row ? JSON.parse(row.data) : {}), date: day };
   }
+  // A refusal leaves its reason in lastRefusal ("day", "household" or "month") so the message can say when it resets.
   reserve(user, patch) {
+    this.lastRefusal = null;
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const day = this.day();
@@ -49,18 +51,35 @@ class UsageStore {
       for (const [key, value] of Object.entries(patch)) {
         if (!FIELDS.includes(key) || !Number.isFinite(value) || value < 0) throw new Error("invalid reservation");
         next[key] += value;
-        if (next[key] > (limits[key] ?? Infinity)) { this.db.exec("ROLLBACK"); return false; }
+        if (next[key] > (limits[key] ?? Infinity)) { this.db.exec("ROLLBACK"); this.lastRefusal = "day"; return false; }
+      }
+      // A household-wide daily ceiling protects the Soniox credit even if one account is misused.
+      for (const key of ["sttSeconds", "ttsChars"]) {
+        if (!patch[key] || this.globalLimits[key] === undefined) continue;
+        const used = this.statement("SELECT COALESCE(SUM(json_extract(data,'$." + key + "')),0) AS total FROM usage WHERE day=? AND user<>?").get(day, user).total;
+        if (used + next[key] > this.globalLimits[key]) { this.db.exec("ROLLBACK"); this.lastRefusal = "household"; return false; }
       }
       if (limits.sttSecondsMonth !== undefined && patch.sttSeconds) {
         const month = day.slice(0, 7);
         const total = this.statement("SELECT COALESCE(SUM(json_extract(data,'$.sttSeconds')),0) AS seconds FROM usage WHERE user=? AND day>=? AND day<?").get(user, month + "-01", month + "-32").seconds;
-        if (total + patch.sttSeconds > limits.sttSecondsMonth) { this.db.exec("ROLLBACK"); return false; }
+        if (total + patch.sttSeconds > limits.sttSecondsMonth) { this.db.exec("ROLLBACK"); this.lastRefusal = "month"; return false; }
       }
       this.db.prepare("INSERT INTO usage(user,day,data) VALUES(?,?,?) ON CONFLICT(user,day) DO UPDATE SET data=excluded.data").run(user, day, JSON.stringify(next));
       this.db.exec("COMMIT");
       return true;
     } catch (err) { try { this.db.exec("ROLLBACK"); } catch {} throw err; }
   }
+  // Records usage that already happened (the provider billed it) even above the limit; later requests are then refused.
+  record(user, patch) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const day = this.day(), next = this.read(user, day);
+      for (const [key, value] of Object.entries(patch)) { if (!FIELDS.includes(key) || !Number.isFinite(value) || value < 0) throw new Error("invalid record"); next[key] += value; }
+      this.db.prepare("INSERT INTO usage(user,day,data) VALUES(?,?,?) ON CONFLICT(user,day) DO UPDATE SET data=excluded.data").run(user, day, JSON.stringify(next));
+      this.db.exec("COMMIT");
+    } catch (err) { try { this.db.exec("ROLLBACK"); } catch {} throw err; }
+  }
+  remaining(user, key) { const limit = this.limitsFor(user)[key]; return limit === undefined ? Infinity : limit - this.read(user, this.day())[key]; }
   getUser(username) { return this.statement("SELECT * FROM users WHERE username=?").get(username); }
   listUsers() { return this.statement("SELECT * FROM users ORDER BY username").all(); }
   createUser({ username, role, passwordHash, limits = null, note = null }) {

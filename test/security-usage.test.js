@@ -36,14 +36,15 @@ test("transaction reservations cannot exceed shared limits and persist across re
   c.close(); assert.throws(()=>c.reserve("owner",{ttsRequests:1}));
   // Only remove the exact files this test created.
   for (const name of ["test.sqlite","test.sqlite-wal","test.sqlite-shm"]) { const f=path.join(dir,name); if(fs.existsSync(f)) fs.unlinkSync(f); }
-  fs.rmdirSync(dir);
+  // Windows may keep a just-deleted file "pending" for a moment under load; the private temp folder is retried.
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });
 test("failed catalog refresh preserves last good model and all its languages", async () => {
   const store = new UsageStore(":memory:");
   let available = true;
   const catalog = new Catalog({store,urls:{stt:"mock",tts:"mock"},apiKey:"mock",fetchImpl:async()=> {
     if (!available) throw new Error("offline");
-    return {ok:true,json:async()=>({models:[{id:"stt-rt-v5",languages:["sk","de","es","en","ar","zh"]}]})};
+    return {ok:true,json:async()=>({models:[{id:"stt-rt-v6",languages:["sk","de","es","en","ar","zh"]}]})};
   }});
   const first = await catalog.get("stt"); assert.equal(first.languages.length,6);
   catalog.data.get("stt").updated_at = "2000-01-01T00:00:00Z"; available=false;

@@ -10,10 +10,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Prekladač">
   <title>Soniox prekladač</title>
-  <link rel="manifest" href="/manifest.webmanifest?v=3.5.0">
-  <link rel="icon" href="/icon.svg?v=3.5.0" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="/icon-180.png?v=3.5.0">
-  <link rel="stylesheet" href="/style.css?v=3.5.0">
+  <link rel="manifest" href="/manifest.webmanifest?v=3.6.1">
+  <link rel="icon" href="/icon.svg?v=3.6.1" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-180.png?v=3.6.1">
+  <link rel="stylesheet" href="/style.css?v=3.6.1">
 </head>
 <body>
   <svg class="sprite" aria-hidden="true" focusable="false">
@@ -35,8 +35,6 @@
     <symbol id="i-wave" viewBox="0 0 64 64"><path d="M10 22c7-8 15-8 22 0s15 8 22 0"/><path d="M10 42c7-8 15-8 22 0s15 8 22 0"/></symbol>
   </svg>
 
-  <div id="offlineBanner" class="banner banner-warn" role="status" hidden>Si offline. Preklad pokračuje po obnovení internetu.</div>
-
   <main id="loginShell" class="login" hidden>
     <div class="login-card">
       <span class="logo" aria-hidden="true"><svg><use href="#i-wave"/></svg></span>
@@ -56,6 +54,7 @@
   </main>
 
   <div id="appShell" class="app" hidden>
+    <div id="offlineBanner" class="banner banner-warn" role="status" hidden>Si offline. Rozhovor je pozastavený, kým sa internet nevráti.</div>
     <header class="topbar">
       <div class="lang-pill" role="group" aria-label="Jazyky rozhovoru">
         <button id="langABtn" class="lang-btn lang-me" type="button" aria-label="Môj jazyk"><span class="lang-code" id="langACode">SK</span><span class="lang-name" id="langAName">Slovenčina</span></button>
@@ -77,17 +76,19 @@
     <p id="errorBanner" class="banner banner-error" role="alert" hidden><span id="errorText"></span><button id="errorClose" class="icon-btn icon-sm" type="button" aria-label="Zavrieť upozornenie"><svg><use href="#i-close"/></svg></button></p>
 
     <section id="stage" class="stage" aria-label="Rozhovor">
-      <div id="listenCalm" class="empty listen-calm" role="status" hidden><p class="empty-title" id="listenCalmTitle">Počúvam</p><p class="empty-sub">Hlas ide do slúchadiel / reproduktora podľa telefónu.</p></div>
-      <div id="feed" class="feed" aria-live="polite">
+      <div id="listenCalm" class="empty listen-calm" role="status" hidden><p class="empty-title" id="listenCalmTitle">Počúvam</p><p class="empty-sub">Preklad zaznie z telefónu, alebo zo slúchadiel, ak sú pripojené.</p></div>
+      <p id="announce" class="sr-only" aria-live="polite"></p>
+      <div id="feed" class="feed">
         <div id="emptyState" class="empty">
           <span class="empty-mark" aria-hidden="true"><svg><use href="#i-wave"/></svg></span>
           <p class="empty-title" id="emptyTitle">Ťukni na mikrofón a hovor</p>
           <p class="empty-sub" id="emptySub">Preklad sa zobrazí tu a prečíta nahlas.</p>
         </div>
       </div>
+      <button id="jumpBtn" class="jump" type="button" hidden>↓ Najnovšie</button>
       <div id="facePanel" class="face" hidden>
-        <article class="face-half face-other"><span id="faceOtherLabel" class="face-label"></span><p id="faceOther" class="face-text" dir="auto"></p></article>
-        <article class="face-half face-me"><span id="faceMyLabel" class="face-label"></span><p id="faceMy" class="face-text" dir="auto"></p></article>
+        <article class="face-half face-other"><span class="face-dot" aria-hidden="true"></span><span id="faceOtherLabel" class="face-label"></span><p id="faceOther" class="face-text" dir="auto"></p></article>
+        <article class="face-half face-me"><span class="face-dot" aria-hidden="true"></span><span id="faceMyLabel" class="face-label"></span><p id="faceMy" class="face-text" dir="auto"></p></article>
       </div>
     </section>
 
@@ -101,7 +102,8 @@
     </section>
 
     <footer class="dock">
-      <div class="dock-status"><span id="statusDot" class="dot"></span><span id="status" role="status" aria-live="polite">Pripravený</span><span id="modeLabel" class="dock-mode"></span></div>
+      <div class="dock-status"><span id="statusDot" class="dot"></span><span id="status">Pripravený</span><span id="modeLabel" class="dock-mode"></span></div>
+      <div id="finishNowBar" class="resume" hidden><button id="finishNowBtn" class="btn btn-ghost btn-block" type="button">Ukončiť hneď</button></div>
       <div id="resumeBar" class="resume" hidden><button id="resumeBtn" class="btn btn-primary btn-block" type="button">Pokračovať v rozhovore</button></div>
       <div id="autoControls" class="dock-row">
         <button id="faceBtn" class="icon-btn icon-lg" type="button" aria-pressed="false" aria-label="Zobrazenie oproti sebe"><svg><use href="#i-face"/></svg></button>
@@ -158,6 +160,11 @@
           <button type="button" role="radio" data-value="0.9">Pomalšie</button><button type="button" role="radio" data-value="1">Normálne</button><button type="button" role="radio" data-value="1.15">Rýchlejšie</button>
         </div>
       </div>
+      <div class="field"><span class="field-label" id="textScaleLabel">Veľkosť textu</span>
+        <div class="segmented" role="radiogroup" aria-labelledby="textScaleLabel" data-setting="textScale">
+          <button type="button" role="radio" data-value="1">Normálne</button><button type="button" role="radio" data-value="1.25">Väčšie</button><button type="button" role="radio" data-value="1.5">Najväčšie</button>
+        </div>
+      </div>
       <div class="field"><label class="field-label" for="profileId">Prostredie</label>
         <select id="profileId" class="select"><option value="conversation">Bežný rozhovor</option><option value="office">Úrad</option><option value="interview">Pohovor</option><option value="doctor">Lekár</option><option value="hotel">Hotel</option><option value="administration">Administratíva</option><option value="cnc">CNC a výroba</option></select>
       </div>
@@ -182,6 +189,8 @@
   <dialog id="passkeySheet" class="sheet" aria-labelledby="passkeyTitle">
     <div class="sheet-head"><h2 id="passkeyTitle">Odtlačok / Face ID</h2><button class="icon-btn close-sheet" type="button" aria-label="Zavrieť"><svg><use href="#i-close"/></svg></button></div>
     <section class="group">
+      <label class="field-label" for="passkeyPassword">Na potvrdenie zadaj svoje heslo</label>
+      <input id="passkeyPassword" class="field" type="password" autocomplete="current-password" maxlength="512">
       <button id="passkeyCreateBtn" class="btn btn-primary btn-block" type="button">Zapnúť na tomto zariadení</button>
       <p class="hint">Odtlačok ani tvár neopustia telefón. Meno a heslo fungujú ďalej.</p>
       <p id="passkeyStatus" class="hint" role="status"></p>
@@ -197,7 +206,7 @@
     <details class="group" id="auditDetails"><summary>Posledné zmeny</summary><div id="adminAudit" class="list"></div></details>
   </dialog>
 
-  <dialog id="userSheet" class="sheet admin-sheet" aria-labelledby="userTitle">
+  <dialog id="userSheet" class="sheet admin-sheet" data-persistent aria-labelledby="userTitle">
     <div class="sheet-head"><h2 id="userTitle"></h2><button class="icon-btn close-sheet" type="button" aria-label="Späť do správy"><svg><use href="#i-close"/></svg></button></div>
     <section class="group"><div id="userBadges" class="badges"></div><p id="userNote" class="hint admin-note"></p></section>
     <section class="group"><h3 class="group-title">Tento mesiac</h3><div id="userUsage"></div><h3 class="group-title">Rozpoznávanie · 30 dní</h3><div id="userChart"></div></section>
@@ -214,7 +223,7 @@
     <section class="group"><h3 class="group-title">Prihlásené zariadenia</h3><div id="userDevices" class="list"></div></section>
   </dialog>
 
-  <dialog id="newUserSheet" class="sheet admin-sheet" aria-labelledby="newUserTitle">
+  <dialog id="newUserSheet" class="sheet admin-sheet" data-persistent aria-labelledby="newUserTitle">
     <div class="sheet-head"><h2 id="newUserTitle">Nový používateľ</h2><button class="icon-btn close-sheet" type="button" aria-label="Späť do správy"><svg><use href="#i-close"/></svg></button></div>
     <form id="newUserForm" class="group">
       <label class="field"><span class="field-label">Meno</span><input id="newUsername" required minlength="2" maxlength="40" pattern="[a-z0-9][a-z0-9._\-]{1,39}" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="usernameHint"></label><p id="usernameHint" class="hint">2–40 znakov: malé písmená, číslice, . _ -</p>
@@ -238,7 +247,7 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/history.js?v=3.5.0"></script>
-  <script src="/app.js?v=3.5.0"></script>
+  <script src="/history.js?v=3.6.1"></script>
+  <script src="/app.js?v=3.6.1"></script>
 </body>
 </html>

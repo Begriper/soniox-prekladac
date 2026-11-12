@@ -3,6 +3,7 @@ const { STT_MODEL, TTS_MODEL } = require("./runtime-models");
 // Public documented baseline; live metadata for the exact model takes precedence.
 const CODES = "af sq ar az eu be bn bs bg ca zh hr cs da nl en et fi fr gl de el gu he hi hu id it ja kn kk ko lv lt mk ms ml mr no fa pl pt pa ro ru sr sk sl es sw sv tl ta te th tr uk ur vi cy".split(" ");
 const VOICE_REFRESH_MS = 480000, VOICE_VALID_MS = 600000;
+const UUID_VOICE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const names = new Intl.DisplayNames(["sk"], { type: "language" });
 const language = code => ({ code, name: names.of(code) || code, native_name: new Intl.DisplayNames([code], { type: "language" }).of(code) || code });
 function normalizeModel(data, id) {
@@ -18,7 +19,7 @@ class Catalog {
   constructor({ store, urls, apiKey, fetchImpl = fetch, ownerUsername = "", ownerVoiceName = "my voice" }) {
     Object.assign(this, { store, urls, apiKey, fetchImpl }); this.pending = new Map(); this.retryAt = new Map();
     this.ownerUsername = ownerUsername; this.ownerVoiceName = ownerVoiceName.trim().toLowerCase();
-    this.shared = null; this.custom = null; this.voiceUpdatedAt = 0; this.voiceRetryAt = 0; this.voicePending = null;
+    this.shared = null; this.custom = null; this.voiceUpdatedAt = 0; this.customUpdatedAt = 0; this.voiceRetryAt = 0; this.voicePending = null;
     this.data = new Map();
     for (const kind of ["stt", "tts"]) {
       const model = kind === "stt" ? STT_MODEL : TTS_MODEL;
@@ -62,33 +63,46 @@ class Catalog {
   }
   // The list stays valid for 10 minutes but is refreshed after 8, so live speech rarely waits for the network.
   voicesUsable() { return Date.now() < this.voiceUpdatedAt + VOICE_VALID_MS; }
-  async ensureVoices() {
+  // A caller that needs a cloned voice also waits for the custom list once it has expired; shared voices never do.
+  async ensureVoices(voice = "", forUser = "") {
     const refresh = this.refreshVoices();
-    if (!this.voicesUsable()) await refresh;
+    const wantsCustom = UUID_VOICE.test(String(voice)) || (Boolean(forUser) && forUser === this.ownerUsername);
+    const needsCustom = Boolean(this.ownerUsername) && wantsCustom && Date.now() >= this.customUpdatedAt + VOICE_VALID_MS;
+    if (!this.voicesUsable() || needsCustom) await refresh;
   }
+  // Shared and custom voices have separate timestamps: a failing custom endpoint neither blocks the shared list
+  // nor wipes the last good custom list, which stays usable until its validity runs out.
   async refreshVoices() {
-    if (Date.now() < this.voiceUpdatedAt + VOICE_REFRESH_MS || Date.now() < this.voiceRetryAt) return;
+    const now = Date.now();
+    const sharedDue = now >= this.voiceUpdatedAt + VOICE_REFRESH_MS;
+    const customDue = Boolean(this.ownerUsername) && now >= this.customUpdatedAt + VOICE_REFRESH_MS;
+    if ((!sharedDue && !customDue) || now < this.voiceRetryAt) return;
     if (this.voicePending) return this.voicePending;
     this.voicePending = (async () => {
       try {
-        const [sharedResult, customResult] = await Promise.allSettled([this.pages("shared", 200), this.ownerUsername ? this.pages("custom", 1000) : Promise.resolve([])]);
-        let sharedReady = false;
-        if (sharedResult.status === "fulfilled") {
-          const validShared = sharedResult.value.filter(v => typeof v.id === "string" && /^[\w. -]{1,80}$/.test(v.id)).map(v => ({ id: v.id, name: v.id, gender: String(v.gender || "neutral"), age: String(v.age || ""), accent: String(v.accent || ""), use_case: Array.isArray(v.use_case) ? v.use_case : [], style: Array.isArray(v.style) ? v.style : [], description: String(v.description || "").slice(0, 500), kind: "shared" }));
-          if (validShared.length) { this.shared = validShared; sharedReady = true; }
+        const [sharedResult, customResult] = await Promise.allSettled([sharedDue ? this.pages("shared", 200) : null, customDue ? this.pages("custom", 1000) : null]);
+        let failed = false;
+        if (sharedDue) {
+          let ready = false;
+          if (sharedResult.status === "fulfilled") {
+            const validShared = sharedResult.value.filter(v => typeof v.id === "string" && /^[\w. -]{1,80}$/.test(v.id)).map(v => ({ id: v.id, name: v.id, gender: String(v.gender || "neutral"), age: String(v.age || ""), accent: String(v.accent || ""), use_case: Array.isArray(v.use_case) ? v.use_case : [], style: Array.isArray(v.style) ? v.style : [], description: String(v.description || "").slice(0, 500), kind: "shared" }));
+            if (validShared.length) { this.shared = validShared; this.voiceUpdatedAt = Date.now(); ready = true; }
+          }
+          if (!ready) failed = true;
         }
-        this.custom = customResult.status === "fulfilled" ? customResult.value : null;
-        if (sharedReady && customResult.status === "fulfilled") {
-          this.voiceUpdatedAt = Date.now(); this.voiceRetryAt = 0;
-        } else this.voiceRetryAt = Date.now() + 60000;
-      } catch { this.custom = null; this.voiceRetryAt = Date.now() + 60000; }
+        if (customDue) {
+          if (customResult.status === "fulfilled") { this.custom = customResult.value; this.customUpdatedAt = Date.now(); }
+          else failed = true;
+        }
+        this.voiceRetryAt = failed ? Date.now() + 60000 : 0;
+      } catch { this.voiceRetryAt = Date.now() + 60000; }
       finally { this.voicePending = null; }
     })();
     return this.voicePending;
   }
   ownerVoice() {
     if (!this.ownerUsername) return { status: "not_configured", message: "Vlastník hlasu nie je nastavený na serveri." };
-    if (!this.custom || Date.now() >= this.voiceUpdatedAt + 600000) return { status: "unavailable", message: "Zoznam vlastných hlasov Soniox nie je momentálne dostupný." };
+    if (!this.custom || Date.now() >= this.customUpdatedAt + VOICE_VALID_MS) return { status: "unavailable", message: "Zoznam vlastných hlasov Soniox nie je momentálne dostupný." };
     const voice = this.custom.find(v => String(v.name || "").trim().toLowerCase() === this.ownerVoiceName);
     if (!voice) return { status: "missing", message: "Hlas my voice sa v Soniox projekte tohto API kľúča nenašiel." };
     const model = voice.models?.find(m => m.model === TTS_MODEL);

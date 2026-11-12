@@ -103,7 +103,8 @@ test("listen session limit reports limit and resume does not consume another dai
   const expire = session.limitTimer._onTimeout; clearTimeout(session.limitTimer); expire();
   await until(() => ws.messages.some(m => m.type === "session_finished"));
   assert.equal(ws.messages.find(m => m.type === "session_finished").reason, "limit");
-  const next = await f.connect(cookie, { mode: "listen", language_a: "sk", tts_enabled: false });
+  // The app renews a listening session that hit its time limit as an automatic resume.
+  const next = await f.connect(cookie, { mode: "listen", language_a: "sk", tts_enabled: false }, "/?resume=1");
   await until(() => next.messages.some(m => m.type === "server_ready"));
   next.send(JSON.stringify({ type: "client_stop" }));
   await until(() => next.messages.some(m => m.type === "session_finished"));

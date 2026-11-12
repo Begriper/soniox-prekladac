@@ -1,5 +1,8 @@
 app = "soniox-prekladac"
 primary_region = "fra"
+# Running conversations get time to finish the last sentence and tell phones to reconnect.
+kill_signal = "SIGTERM"
+kill_timeout = 30
 
 [build]
   dockerfile = "Dockerfile"

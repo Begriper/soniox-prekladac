@@ -12,11 +12,17 @@ let pending = [], pendingBytes = 0, lastFrameAt = 0, captureWatch = null;
 let reconnectAttempts = 0, resumePending = false, faceMode = false;
 let mode = "conversation", listenSource = "auto", listenSubtitles = true, listenVoice = true, userStopped = false;
 let languageSide = "A", voiceSide = "A", voiceGender = "";
-const prefs = { conversationMode: "auto", outputMode: "speaker", ttsSpeed: "1", profileId: "conversation" };
+// keptFor: owner of a transcript kept across an involuntary sign-out; showVersion: guards concurrent showApp calls.
+let pttQueuedFrames = [], pttQueuedBytes = 0;
+let keptFor = null, showVersion = 0, drainingStop = false, pttQueued = "", reloadOnIdle = false, wakeWarned = false, audioUnlockArmed = false;
+const APP_VERSION = "3.6.1";
+const prefs = { conversationMode: "auto", outputMode: "speaker", ttsSpeed: "1", profileId: "conversation", textScale: "1" };
+const TEXT_SCALES = ["1", "1.25", "1.5"];
+let announced = new Set(), finishSlow = false, slowStopTimer = null;
 const MAX_CACHE = 12 * 1024 * 1024;
-const RECONNECTABLE = new Set(["stt_connection", "stt_timeout", "stt_retry"]);
+const RECONNECTABLE = new Set(["stt_connection", "stt_timeout", "stt_retry", "server_restart"]);
 const STABLE_MS = 30000;
-const START_BUFFER_BYTES = 3 * 16000 * 2;
+const START_BUFFER_BYTES = 5 * 16000 * 2;
 const STATE_LABELS = { idle: "Pripravený", connecting: "Pripájam…", listening: "Počúvam", translating: "Prekladám", speaking: "Hovorím", finishing: "Dokončujem preklad…", confirm_language: "Potvrď jazyk", reconnecting: "Obnovujem spojenie…", paused: "Pozastavené" };
 const AUDIO_LABELS = { pending: "Čaká", queued: "Vo fronte", played: "Prehrané", interrupted: "Prerušené", not_spoken: "Neprehrané", text_only: "Iba text" };
 const store = {
@@ -26,7 +32,11 @@ const store = {
 
 /* ---------- small helpers ---------- */
 function toast(message) { const t = $("toast"); (Array.from(document.querySelectorAll("dialog[open]")).at(-1) || document.body).append(t); t.textContent = message; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => t.hidden = true, 3200); }
-function error(message) { $("errorText").textContent = message || ""; $("errorBanner").hidden = !message; }
+function error(message) {
+  $("errorText").textContent = message || ""; $("errorBanner").hidden = !message;
+  // The banner sits under an open sheet's backdrop; the toast is placed inside the sheet.
+  if (message && document.querySelector("dialog[open]")) toast(message);
+}
 function haptic() { try { navigator.vibrate?.(12); } catch {} }
 function name(code) { return code === "auto" ? "Rozpoznať jazyk" : languages.find(l => l.code === code)?.name || code; }
 function shortCode(code) { return code === "auto" ? "?" : String(code).toUpperCase(); }
@@ -42,7 +52,7 @@ function closeSheets() { for (const d of document.querySelectorAll("dialog[open]
 function saveSettings() {
   store.set("langA", chosenA); store.set("langB", chosenB); store.set("voiceA", voiceA); store.set("voiceB", voiceB);
   store.set("conversationMode", prefs.conversationMode); store.set("outputMode", prefs.outputMode);
-  store.set("ttsSpeed", prefs.ttsSpeed); store.set("profileId", prefs.profileId);
+  store.set("ttsSpeed", prefs.ttsSpeed); store.set("profileId", prefs.profileId); store.set("textScale", prefs.textScale);
   store.set("ttsEnabled", String(prefs.outputMode !== "text"));
   store.set("mode", mode); store.set("listen_source", listenSource);
   store.set("listenSubtitles", String(listenSubtitles)); store.set("listenVoice", String(listenVoice));
@@ -50,14 +60,38 @@ function saveSettings() {
   store.set("recent", [...new Set(recent)].slice(0, 6).join(","));
 }
 
+const OFFLINE_MESSAGE = "Server neodpovedá. Skontroluj internet a skús znova.";
 async function api(url, options = {}) {
-  const response = await fetch(url, { credentials: "same-origin", signal: AbortSignal.timeout(8000), ...options, headers: { "Content-Type": "application/json", ...options.headers } });
+  let response;
+  try { response = await fetch(url, { credentials: "same-origin", signal: AbortSignal.timeout(8000), ...options, headers: { "Content-Type": "application/json", ...options.headers } }); }
+  catch (err) { if (options.signal?.aborted) throw err; throw new Error(OFFLINE_MESSAGE); }
   if (!response.ok) {
     let message = "Operácia zlyhala.", code; try { const data = await response.json(); message = data.error || message; code = data.code; } catch {}
     if (response.status === 401 && user) await signOut(false);
-    const failure = new Error(message); failure.code = code; throw failure;
+    const failure = new Error(message); failure.code = code; failure.status = response.status; throw failure;
   }
   return response.json();
+}
+// iOS before 17.4 has no AbortSignal.any.
+function anySignal(signals) {
+  if (AbortSignal.any) return AbortSignal.any(signals);
+  const controller = new AbortController();
+  for (const signal of signals) { if (signal.aborted) { controller.abort(signal.reason); break; } signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true }); }
+  return controller.signal;
+}
+// A new service worker took over: reload once nothing would be lost.
+function maybeReload() {
+  if (reloadOnIdle && !running && !stopping && !dirty && !document.querySelector("dialog[open]")) { reloadOnIdle = false; location.reload(); }
+}
+// The server refused this older app version: keep the transcript on the device, then load the new version.
+function updateNow() {
+  disconnect();
+  const owner = user, items = entries.slice();
+  if (!dirty || !owner || !items.length) { error("Appka má novú verziu, načítavam ju…"); location.reload(); return; }
+  // Reload only after the transcript is safely stored; a failed save keeps it on screen.
+  LocalHistory.save(owner, items, { a: chosenA, b: chosenB })
+    .then(() => { dirty = false; error("Appka má novú verziu, načítavam ju…"); location.reload(); })
+    .catch(() => { reloadOnIdle = true; error("Appka má novú verziu. Rozhovor sa nepodarilo uložiť: skopíruj si ho (Menu › Kopírovať text) a potom ťukni na Nový rozhovor."); });
 }
 function send(data) { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(data)); }
 
@@ -66,6 +100,9 @@ function controls() {
   const app = $("appShell"), listen = mode === "listen", ptt = microphoneMode() === "ptt";
   const state = stopping ? "finishing" : reconnectTimer ? "reconnecting" : running ? (serverState === "idle" ? "connecting" : serverState) : resumePending ? "paused" : "idle";
   app.dataset.state = state;
+  app.style.setProperty?.("--text-scale", prefs.textScale);
+  for (const dot of document.querySelectorAll(".face-dot")) dot.dataset.state = state;
+  $("finishNowBar").hidden = !(stopping && finishSlow);
   app.dataset.mode = mode;
   for (const b of $("sessionMode").querySelectorAll("button")) {
     b.setAttribute("aria-checked", String(b.dataset.mode === mode)); b.disabled = running || stopping || Boolean(reconnectTimer);
@@ -79,8 +116,10 @@ function controls() {
   $("status").textContent = STATE_LABELS[state] || STATE_LABELS.idle;
   $("modeLabel").textContent = listen ? listenVoice ? "Hlas · výstup telefónu" : "Iba titulky" : (ttsEnabled() ? outputMode() === "speaker" ? "Reproduktor" : "Slúchadlá" : "Iba text") + (ptt ? " · Podržať" : "");
   $("langACode").textContent = shortCode(chosenA); $("langAName").textContent = capitalize(name(chosenA));
-  $("langBCode").textContent = shortCode(listen ? listenSource : chosenB); $("langBName").textContent = listen ? (listenSource === "auto" ? "Auto" : capitalize(name(listenSource))) + " ▾" : capitalize(name(chosenB));
-  $("langBBtn").setAttribute("aria-label", listen ? "Jazyk, ktorý počúvam" : "Jazyk druhej osoby");
+  $("langBCode").textContent = shortCode(listen ? listenSource : chosenB); $("langBName").textContent = listen ? (listenSource === "auto" ? "Auto" : capitalize(name(listenSource))) : capitalize(name(chosenB));
+  // The accessible name keeps the visible language (the dropdown mark comes from CSS).
+  $("langABtn").setAttribute("aria-label", "Môj jazyk: " + capitalize(name(chosenA)));
+  $("langBBtn").setAttribute("aria-label", (listen ? "Jazyk, ktorý počúvam: " : "Jazyk druhej osoby: ") + $("langBName").textContent);
   $("swapBtn").hidden = listen; $("listenArrow").hidden = !listen;
   for (const id of ["langABtn", "langBBtn"]) $(id).disabled = running || stopping;
   $("swapBtn").disabled = running || stopping || chosenB === "auto";
@@ -89,14 +128,18 @@ function controls() {
   mic.setAttribute("aria-label", listen ? running ? "Zastaviť počúvanie" : "Spustiť počúvanie" : running ? "Zastaviť rozhovor" : entries.length ? "Pokračovať v rozhovore" : "Počúvať");
   $("autoControls").hidden = running && ptt;
   $("pttControls").hidden = !(running && ptt);
-  for (const id of ["pttA", "pttB"]) $(id).disabled = !ready || stopping || pttEnding;
+  for (const id of ["pttA", "pttB"]) $(id).disabled = !ready || stopping;
   $("pttEndBtn").disabled = stopping;
   $("pttALabel").textContent = capitalize(name(chosenA)); $("pttBLabel").textContent = capitalize(name(chosenB));
   $("stopAudioBtn").disabled = !playback && !localPlayback && !previewAbort;
-  $("resumeBar").hidden = running || !resumePending || !entries.length;
+  // Shown whenever a stopped conversation can continue, also with an empty transcript (the error texts point to it).
+  $("resumeBar").hidden = running || !resumePending;
+  $("resumeBtn").textContent = listen ? "Pokračovať v počúvaní" : "Pokračovať v rozhovore";
   $("faceBtn").setAttribute("aria-pressed", String(faceMode));
   $("faceBtn").hidden = listen;
   $("facePanel").hidden = listen || !faceMode;
+  // A phone held sideways has ~320 px of height; the face halves need the space of the header and mode switch.
+  $("appShell").classList.toggle("face-on", faceMode && !listen);
   $("feed").hidden = listen ? !listenSubtitles : faceMode;
   for (const group of document.querySelectorAll(".segmented[data-setting]")) {
     const value = prefs[group.dataset.setting];
@@ -398,7 +441,10 @@ function saveDevicePasskeys(ids) {
 function renderPasskeyState() {
   $("passkeyBtn").hidden = !passkeyAvailable;
   $("passkeyState").textContent = (devicePasskeys()[user] || []).length ? "Zapnuté na tomto zariadení" : "Vypnuté";
-  $("passkeyLoginBtn").hidden = !passkeyAvailable || store.get("passkey", "0") !== "1";
+  // A passkey synced from another device has no local flag, so the button stays available; it is primary only where one was added here.
+  const known = store.get("passkey", "0") === "1";
+  $("passkeyLoginBtn").hidden = !passkeyAvailable;
+  $("passkeyLoginBtn").classList.toggle("btn-primary", known); $("passkeyLoginBtn").classList.toggle("btn-ghost", !known);
 }
 function abortPasskeyLogin() { passkeyAbort?.abort(); passkeyAbort = null; }
 async function initPasskeys() {
@@ -429,7 +475,8 @@ async function passkeyLogin(conditional = false) {
     if (!controller.signal.aborted && !user) await showApp(data);
   } catch (err) {
     if (err.code === "unknown_credential") { saveDevicePasskeys({}); }
-    if (!controller.signal.aborted && (!conditional || err.code)) $("loginStatus").textContent = "Prihlásenie sa nepodarilo. Skús znova alebo použi meno a heslo.";
+    // Browser exceptions carry numeric DOMException codes; only a server answer (string code) is worth a message in silent mode.
+    if (!controller.signal.aborted && (!conditional || typeof err.code === "string")) $("loginStatus").textContent = err.message === OFFLINE_MESSAGE ? OFFLINE_MESSAGE : "Prihlásenie sa nepodarilo. Skús znova alebo použi meno a heslo.";
   } finally {
     if (passkeyAbort === controller) { passkeyAbort = null; $("passkeyLoginBtn").disabled = false; }
   }
@@ -462,7 +509,10 @@ async function createPasskey() {
   if (passkeyBusy) return;
   const owner = user; passkeyBusy = true; $("passkeyCreateBtn").disabled = true; $("passkeyStatus").textContent = "";
   try {
-    const options = await api("/api/passkeys/register/options", { method: "POST", body: "{}" });
+    const password = $("passkeyPassword").value;
+    if (!password) { $("passkeyStatus").textContent = "Na potvrdenie zadaj svoje heslo."; return; }
+    const options = await api("/api/passkeys/register/options", { method: "POST", body: JSON.stringify({ password }) });
+    $("passkeyPassword").value = "";
     if (owner !== user) return;
     options.challenge = fromBase64url(options.challenge); options.user.id = fromBase64url(options.user.id);
     options.excludeCredentials = options.excludeCredentials.map(c => ({ ...c, id: fromBase64url(c.id) }));
@@ -482,13 +532,17 @@ async function createPasskey() {
 
 /* ---------- session ---------- */
 async function showApp(session) {
+  // Languages and voices load first: a failure keeps the login screen with a visible message instead of an empty app.
+  const version = ++showVersion;
+  const [languageData, voiceData] = await Promise.all([api("/api/languages"), api("/api/voices")]);
+  if (version !== showVersion) return;
   abortPasskeyLogin(); $("passkeyLoginBtn").disabled = false;
+  // A transcript kept after an expired login belongs only to the same account.
+  if (keptFor && keptFor !== session.username) clearEntries();
+  keptFor = null; $("loginStatus").textContent = "";
   user = session.username; $("loginShell").hidden = true; $("appShell").hidden = false; $("accessCode").value = "";
   adminRole = session.role === "admin"; $("adminBtn").hidden = !adminRole;
   renderPasskeyState();
-  const owner = user;
-  const [languageData, voiceData] = await Promise.all([api("/api/languages"), api("/api/voices")]);
-  if (user !== owner) return;
   languages = languageData.languages.sort((a, b) => a.name.localeCompare(b.name, "sk")); voices = voiceData.voices; ttsModel = voiceData.model;
   chosenA = store.get("langA", "sk"); chosenB = store.get("langB", "de");
   if (!languages.some(l => l.code === chosenA)) chosenA = "sk";
@@ -504,10 +558,18 @@ async function showApp(session) {
   prefs.outputMode = store.get("outputMode", store.get("ttsEnabled", "true") === "false" ? "text" : "speaker") === "text" ? "text" : "speaker";
   prefs.ttsSpeed = ["0.9", "1", "1.15"].includes(store.get("ttsSpeed", "1")) ? store.get("ttsSpeed", "1") : "1";
   prefs.profileId = store.get("profileId", "conversation");
+  prefs.textScale = TEXT_SCALES.includes(store.get("textScale", "1")) ? store.get("textScale", "1") : "1";
   if (![...$("profileId").options].some(o => o.value === prefs.profileId)) prefs.profileId = "conversation";
   voiceInfo(voiceData);
   $("catalogNote").textContent = languageData.stale || voiceData.stale ? "Katalóg sa teraz nedá obnoviť, používa sa posledný dostupný." : languages.length + " jazykov · " + voices.length + " hlasov · " + ttsModel;
-  showUsage(session.usage); renderAll(); controls();
+  showUsage(session.usage); renderAll(); controls(); installHint();
+}
+// iPhone has no install prompt; tell once how to put the app on the home screen.
+function installHint() {
+  const ios = /iPhone|iPad/.test(navigator.userAgent || ""), standalone = navigator.standalone || globalThis.matchMedia?.("(display-mode: standalone)").matches;
+  if (!ios || standalone || store.get("installHint", "0") === "1") return;
+  store.set("installHint", "1");
+  toast("Tip: v Safari ťukni na Zdieľať › Pridať na plochu a prekladač sa bude otvárať ako appka.");
 }
 function showUsage(usage) {
   if (!usage) return;
@@ -515,31 +577,69 @@ function showUsage(usage) {
   $("usageInfo").replaceChildren(el("p", "hint account-name", "Prihlásený ako " + user), usageBar("Rozpoznávanie · min", (usage.sttSeconds || 0) / 60, limits.sttSeconds == null ? undefined : limits.sttSeconds / 60), usageBar("Hlasové znaky", usage.ttsChars || 0, limits.ttsChars), usageBar("Rozhovory", usage.sessions || 0, limits.sessions), el("p", "hint", "Denný reset: polnoc UTC."));
 }
 async function signOut(callServer = true) {
-  epoch++; resumePending = false; stopLocal(); disconnect(); clearEntries(); closeSheets();
+  // An expired or revoked login must not wipe the conversation: it stays for the same account and is saved on this device.
+  // A second 401 that arrives after the sign-out (a voice request still in flight) must not clear what was just kept.
+  if (!callServer && !user) return;
+  const owner = user, keep = !callServer && Boolean(owner) && entries.length > 0, unsaved = keep && dirty;
+  const snapshot = entries.slice(), languagesUsed = { a: chosenA, b: chosenB };
+  showVersion++; epoch++; resumePending = false; stopLocal(); disconnect(); closeSheets();
+  keptFor = keep ? owner : null;
+  if (!keep) clearEntries();
   if (callServer) { try { await api("/api/logout", { method: "POST", body: "{}" }); } catch { $("loginStatus").textContent = "Odhlásenie na serveri sa nepotvrdilo. Po obnovení internetu sa prihlás a odhlás znova."; } }
   $("historyList").replaceChildren(); $("usageInfo").replaceChildren();
   adminVersion++; userVersion++; adminRole = false; adminUsers = []; selectedUser = ""; $("adminBtn").hidden = true;
   for (const id of ["adminUsers", "adminUsage", "adminAudit", "sonioxUsage", "userDevices", "userChart", "userUsage", "userActions", "userBadges", "userNote", "userTitle"]) $(id).replaceChildren();
   user = null; $("loginShell").hidden = false; $("appShell").hidden = true; $("accessCode").value = "";
-  $("passkeyList").replaceChildren(); $("passkeyStatus").textContent = ""; renderPasskeyState(); void conditionalPasskeyLogin();
+  // A password typed to confirm a passkey must not wait in the field for the next account on this device.
+  $("passkeyList").replaceChildren(); $("passkeyStatus").textContent = ""; $("passkeyPassword").value = ""; renderPasskeyState(); void conditionalPasskeyLogin();
+  if (keep) {
+    $("loginStatus").textContent = "Prihlásenie vypršalo. Prihlás sa znova, rozhovor zostal zachovaný.";
+    if (unsaved) { try { await LocalHistory.save(owner, snapshot, languagesUsed); if (!user) dirty = false; } catch { /* The transcript stays in memory. */ } }
+  }
 }
 
 /* ---------- audio playback ---------- */
 function ensurePlaybackContext() {
-  if (!playbackContext || playbackContext.state === "closed") playbackContext = new AudioContext();
+  if (!playbackContext || playbackContext.state === "closed") {
+    const context = new AudioContext(); playbackContext = context;
+    // iOS moves the context to "interrupted" for calls, Siri or a route change; it must come back by itself.
+    context.addEventListener?.("statechange", () => {
+      if (playbackContext !== context) return;
+      if (context.state === "running") confirmPlaybackStarted();
+      else if (running || playback || localPlayback) resumePlayback(context);
+    });
+  }
   return playbackContext;
+}
+// The server waits for this confirmation before it starts counting how long the voice may take.
+function confirmPlaybackStarted() {
+  const op = playback;
+  if (op?.startWhenRunning && !op.cancelled) { op.startWhenRunning = false; send({ type: "playback_started", playback_id: op.meta.playback_id }); }
+}
+function resumePlayback(context) {
+  if (context.state === "running" || context.state === "closed") return;
+  void context.resume().catch(() => {});
+  // Some browsers allow resume() only from a user gesture: the next tap anywhere restores the sound.
+  if (audioUnlockArmed) return;
+  audioUnlockArmed = true;
+  const unlock = () => {
+    audioUnlockArmed = false;
+    document.removeEventListener("pointerdown", unlock, true); document.removeEventListener("keydown", unlock, true);
+    if (playbackContext && playbackContext.state !== "running" && playbackContext.state !== "closed") void playbackContext.resume().catch(() => {});
+  };
+  document.addEventListener("pointerdown", unlock, true); document.addEventListener("keydown", unlock, true);
 }
 async function unlockAudio(timeout = 0) {
   const resume = ensurePlaybackContext().resume();
   // Without a user gesture some browsers never settle resume(); reconnects must not hang on it.
   if (timeout) await Promise.race([resume, new Promise(r => setTimeout(r, timeout))]); else await resume;
 }
-function cacheKey(item, voice) { return [item.id, item.target_language, item.translated_text.trim(), voice, ttsModel].join("|"); }
+function cacheKey(item, voice, speed = prefs.ttsSpeed) { return [item.id, item.target_language, item.translated_text.trim(), voice, speed, ttsModel].join("|"); }
 function concat(chunks) { const out = new Uint8Array(chunks.reduce((n, b) => n + b.byteLength, 0)); let i = 0; for (const b of chunks) { out.set(new Uint8Array(b), i); i += b.byteLength; } return out.buffer; }
 function rememberAudio(meta, chunks) {
   const item = entries.find(i => i.id === conversationId + "/" + meta.utterance_id);
   if (!item || !item.is_final || item.translated_text.trim() !== meta.text?.trim()) return;
-  const buffer = concat(chunks), key = cacheKey(item, meta.voice);
+  const buffer = concat(chunks), key = cacheKey(item, meta.voice, meta.speed === undefined ? prefs.ttsSpeed : String(meta.speed));
   if (buffer.byteLength > MAX_CACHE) return;
   if (audioCache.has(key)) audioCacheBytes -= audioCache.get(key).byteLength;
   audioCache.set(key, buffer); audioCacheBytes += buffer.byteLength;
@@ -548,7 +648,7 @@ function rememberAudio(meta, chunks) {
 function stopSources(op) {
   if (!op) return; op.cancelled = true;
   for (const source of op.sources) { source.onended = null; try { source.stop(); } catch {} }
-  op.sources.clear(); clearTimeout(op.timer); op.resolve?.();
+  op.sources.clear(); clearTimeout(op.timer); clearTimeout(op.pausedNotice); op.resolve?.();
 }
 function stopLocal() {
   previewAbort?.abort(); previewAbort = null;
@@ -572,15 +672,31 @@ function schedule(buffer, op, complete) {
   op.bytes = (op.bytes || 0) + buffer.byteLength;
   if (op.bytes > 8 * 1024 * 1024 || buffer.byteLength % 2) { error("Hlas bol prerušený pre neplatné alebo príliš veľké audio."); stopSound(); return; }
   const context = ensurePlaybackContext();
-  if (context.state !== "running") { error("Zvuk je pozastavený. Ťukni na mikrofón a pokračuj."); stopSound(); return; }
+  // A suspended context keeps the scheduled audio and plays it once it resumes.
+  if (context.state !== "running") {
+    resumePlayback(context);
+    if (!op.pausedNotice) op.pausedNotice = setTimeout(() => { if (!op.cancelled && context.state !== "running") error("Zvuk pozastavil telefón. Ťukni na obrazovku a hlas bude pokračovať."); }, 1500);
+  }
   const pcm = new Int16Array(buffer), audio = context.createBuffer(1, pcm.length, 24000);
   const channel = audio.getChannelData(0); for (let i = 0; i < pcm.length; i++) channel[i] = pcm[i] / 32768;
   const source = context.createBufferSource(); source.buffer = audio; source.connect(context.destination);
-  const at = Math.max(context.currentTime + 0.025, op.nextTime || 0); op.nextTime = at + audio.duration;
+  // A short cushion at the start and after every gap absorbs mobile network jitter instead of clicking.
+  const lead = !op.nextTime || op.nextTime < context.currentTime ? 0.12 : 0.025;
+  const at = Math.max(context.currentTime + lead, op.nextTime || 0); op.nextTime = at + audio.duration;
   op.sources.add(source);
   source.onended = () => { op.sources.delete(source); complete(); };
   source.start(at);
-  if (op.meta && !op.started) { op.started = true; op.timer = setTimeout(() => { if (!op.cancelled) send({ type: "playback_started", playback_id: op.meta.playback_id }); }, Math.max(0, (at - context.currentTime) * 1000)); }
+  if (op.meta && !op.started) {
+    op.started = true;
+    // A suspended context does not advance its clock; the start is confirmed when it runs again.
+    if (context.state !== "running") op.startWhenRunning = true;
+    else op.timer = setTimeout(() => {
+      if (op.cancelled) return;
+      // Interrupted during the short cushion: confirm only once the sound really runs again.
+      if (context.state !== "running") { op.startWhenRunning = true; return; }
+      send({ type: "playback_started", playback_id: op.meta.playback_id });
+    }, Math.max(0, (at - context.currentTime) * 1000));
+  }
 }
 function completeStream() {
   const op = playback;
@@ -619,7 +735,7 @@ async function replay(item) {
   if (running && item.conversation === conversationId) send({ type: "replay_translation", item_id: item.server_id });
   else {
     if (running) { toast("Uložený rozhovor prehráš po zastavení počúvania."); return; }
-    await fetchVoice("/api/replay", { text: item.translated_text, language: item.target_language, voice });
+    await fetchVoice("/api/replay", { text: item.translated_text, language: item.target_language, voice, tts_speed: Number(prefs.ttsSpeed) });
   }
 }
 function replayChunks(text) {
@@ -641,7 +757,7 @@ async function fetchVoice(url, payload) {
     const chunks = url === "/api/replay" ? replayChunks(payload.text) : [null];
     for (const text of chunks) {
       if (abort.signal.aborted) break;
-      const response = await fetch(url, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, signal: AbortSignal.any([abort.signal, AbortSignal.timeout(20000)]), body: JSON.stringify(text === null ? payload : { ...payload, text }) });
+      const response = await fetch(url, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, signal: anySignal([abort.signal, AbortSignal.timeout(20000)]), body: JSON.stringify(text === null ? payload : { ...payload, text }) });
       if (!response.ok) { let e = {}; try { e = await response.json(); } catch {} if (response.status === 401) void signOut(false); throw new Error(e.error || "Hlas nie je dostupný."); }
       const buffer = await response.arrayBuffer();
       if (abort.signal.aborted) break;
@@ -683,18 +799,24 @@ function renderFace() {
   $("faceOther").textContent = last ? (isMine(last) ? last.translated_text : last.source_text) : "";
   $("faceMy").lang = chosenA; $("faceOther").lang = chosenB === "auto" ? "und" : chosenB;
 }
-function render(changed) {
-  const feed = $("feed"), pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 120;
+function render(changed, pinnedBefore) {
+  const feed = $("feed"), pinned = pinnedBefore ?? feed.scrollHeight - feed.scrollTop - feed.clientHeight < 120;
   $("emptyState").hidden = entries.length > 0;
   for (const item of changed) renderItem(item);
+  for (const item of changed) if (item.is_final && item.translated_text?.trim() && !announced.has(item.id)) {
+    announced.add(item.id); $("announce").lang = item.target_language || ""; $("announce").textContent = item.translated_text;
+  }
   const latest = entries.findLast(i => i.translated_text?.trim()) || entries.at(-1);
   for (const [id, node] of nodes) node.article.classList.toggle("latest", id === latest?.id);
   renderFace();
+  // Someone reading older sentences is not pulled down; a button brings them back to the latest one.
   if (pinned) feed.scrollTop = feed.scrollHeight;
+  else if (changed.length) $("jumpBtn").hidden = false;
 }
 function renderAll() {
+  const feed = $("feed"), pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 120;
   for (const node of nodes.values()) node.article.remove();
-  nodes.clear(); render(entries);
+  nodes.clear(); render(entries, pinned);
 }
 
 /* ---------- server messages ---------- */
@@ -711,8 +833,10 @@ function receive(msg) {
   }
   if (msg.type === "state") {
     ready = Boolean(msg.accept_audio); muted = Boolean(msg.microphone_muted);
-    stopping = msg.state === "finishing"; serverState = msg.state;
-    if (stopping) void stopCapture(false);
+    // Stopping is one-way: a state sent before the server saw client_stop must not bring the UI back to "listening".
+    if (msg.state === "finishing") stopping = true;
+    serverState = msg.state;
+    if (stopping && !drainingStop) void stopCapture(false);
     controls();
   }
   if (msg.type === "token") {
@@ -747,11 +871,13 @@ function receive(msg) {
   if (msg.type === "audio_cancelled") { if (cancelRequest && msg.request_id !== cancelRequest) return; cancelRequest = ""; stopSources(playback); playback = null; stopLocal(); muted = false; controls(); }
   if (msg.type === "error") {
     if (msg.fatal && RECONNECTABLE.has(msg.code)) { connectionLost(); return; }
+    if (msg.code === "client_outdated") { updateNow(); return; }
     error(msg.message);
     if (msg.fatal) { disconnect(); if (msg.code === "auth_expired") void signOut(false); }
   }
   if (msg.type === "session_finished") {
-    const renew = mode === "listen" && msg.reason === "limit" && running && !userStopped && navigator.onLine && document.visibilityState === "visible";
+    // The server ends every conversation after its time limit; both modes continue seamlessly in a new one.
+    const renew = msg.reason === "limit" && running && !userStopped && navigator.onLine && document.visibilityState === "visible";
     disconnect();
     if (renew) void start(true);
     void api("/api/usage").then(showUsage).catch(() => {});
@@ -760,8 +886,12 @@ function receive(msg) {
 
 /* ---------- microphone ---------- */
 function sendPcm(buffer, flush = false) {
-  if (!running || muted || (stopping && !flush)) return;
-  if (microphoneMode() === "ptt" && !pttPressed && !pttDraining) return;
+  if (!running || muted || (stopping && !flush && !drainingStop)) return;
+  if (microphoneMode() === "ptt" && !pttPressed && !pttDraining) {
+    // The next press waits for the previous release; what is said meanwhile is sent right after it starts.
+    if (pttQueued && pttQueuedBytes + buffer.byteLength <= 64000) { pttQueuedFrames.push(buffer); pttQueuedBytes += buffer.byteLength; }
+    return;
+  }
   // People start talking right after the tap; speech captured while the connection opens is sent once it is ready.
   if (!ready || socket?.readyState !== WebSocket.OPEN) {
     if (!stopping && pendingBytes + buffer.byteLength <= START_BUFFER_BYTES) { pending.push(buffer); pendingBytes += buffer.byteLength; }
@@ -780,17 +910,26 @@ function sendPcm(buffer, flush = false) {
 }
 async function startCapture(currentEpoch) {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-  if (epoch !== currentEpoch) { stream.getTracks().forEach(t => t.stop()); return; }
+  // The connection now opens while the permission prompt is shown, so Stop may come first: it sets stopping
+  // without a new epoch, and the microphone must not be opened for a conversation that is already finishing.
+  const gone = () => epoch !== currentEpoch || stopping;
+  if (gone()) { stream.getTracks().forEach(t => t.stop()); return; }
   media = stream;
   // The device rate is kept; the worklet resamples to 16 kHz, so no browser has to convert between contexts.
-  captureContext = new AudioContext();
-  await captureContext.resume();
-  if (epoch !== currentEpoch) return;
+  const context = captureContext = new AudioContext();
+  // The conversation may end while the permission prompt or the worklet load is pending: release what was taken here.
+  const abandon = () => {
+    stream.getTracks().forEach(t => t.stop()); if (media === stream) media = null;
+    if (captureContext === context) captureContext = null;
+    if (context.state !== "closed") void context.close().catch(() => {});
+  };
+  await context.resume();
+  if (gone()) return abandon();
   if (!captureContext.audioWorklet) throw Object.assign(new Error("AudioWorklet unavailable"), { name: "NotSupportedError" });
   const source = captureContext.createMediaStreamSource(stream);
   const gain = captureContext.createGain(); gain.gain.value = 0; gain.connect(captureContext.destination);
-  await captureContext.audioWorklet.addModule("/audio-capture-worklet.js?v=3.5.0");
-  if (epoch !== currentEpoch) return;
+  await context.audioWorklet.addModule("/audio-capture-worklet.js?v=3.6.1");
+  if (gone()) return abandon();
   worklet = new AudioWorkletNode(captureContext, "pcm-capture-processor", { processorOptions: { targetSampleRate: 16000, chunkSize: 1024 } });
   worklet.port.onmessage = event => {
     if (event.data.type === "audio") { lastFrameAt = Date.now(); sendPcm(event.data.buffer, event.data.flush); }
@@ -805,16 +944,16 @@ async function startCapture(currentEpoch) {
     track.addEventListener("mute", () => { clearTimeout(muteTimer); muteTimer = setTimeout(() => captureLost(currentEpoch), 3000); });
     track.addEventListener("unmute", () => clearTimeout(muteTimer));
   }
-  const context = captureContext;
   context.addEventListener("statechange", () => { if (captureContext === context && context.state !== "running" && context.state !== "closed") void context.resume().catch(() => {}); });
   lastFrameAt = Date.now();
   source.connect(worklet); worklet.connect(gain);
 }
 function captureLost(token) {
   if (epoch !== token || !running || stopping) return;
-  send({ type: "client_stop" }); disconnect(); resumePending = true;
+  // The page is still visible: finish like a normal stop so the last sentence is translated and spoken.
+  resumePending = true;
   error("Mikrofón sa prerušil (hovor, slúchadlá alebo iná appka). Ťukni na Pokračovať.");
-  controls();
+  void pause().catch(() => {});
 }
 function flushWorklet() {
   if (!worklet) return Promise.resolve();
@@ -825,18 +964,36 @@ function flushWorklet() {
   });
 }
 async function stopCapture(flush) {
-  if (flush) await flushWorklet();
-  if (worklet) { worklet.port.onmessage = null; worklet.disconnect(); worklet = null; }
-  media?.getTracks().forEach(t => t.stop()); media = null;
-  const context = captureContext; captureContext = null; if (context && context.state !== "closed") await context.close();
+  // A new conversation may start while the flush is pending; only the resources taken here are released.
+  const node = worklet, stream = media, context = captureContext;
+  if (flush && node) await flushWorklet();
+  if (node) { node.port.onmessage = null; node.disconnect(); }
+  stream?.getTracks().forEach(t => t.stop());
+  if (worklet === node) worklet = null;
+  if (media === stream) media = null;
+  if (captureContext === context) captureContext = null;
+  if (context && context.state !== "closed") await context.close();
 }
 async function lockScreen() {
-  if (!navigator.wakeLock || document.visibilityState !== "visible") return;
-  try { const lock = await navigator.wakeLock.request("screen"); wakeLock = lock; lock.addEventListener("release", () => { if (wakeLock === lock) wakeLock = null; }); } catch {}
+  if (document.visibilityState !== "visible") return;
+  try {
+    if (!navigator.wakeLock) throw new Error("unsupported");
+    const lock = await navigator.wakeLock.request("screen"); wakeLock = lock; lock.addEventListener("release", () => { if (wakeLock === lock) wakeLock = null; });
+  } catch {
+    // Nobody touches the screen while listening; an auto-lock would end the session.
+    if (mode === "listen" && !wakeWarned) { wakeWarned = true; toast("Telefón môže zamknúť obrazovku a počúvanie sa zastaví. Vypni automatické zamykanie."); }
+  }
 }
 
 /* ---------- conversation lifecycle ---------- */
-async function start(automatic = false) {
+function microphoneError(err) {
+  if (err.name === "NotAllowedError") return /iPhone|iPad/.test(navigator.userAgent || "") ? "Povoľ mikrofón: Nastavenia › Safari (alebo Prekladač) › Mikrofón › Povoliť, potom ťukni znova." : "Povoľ mikrofón: ťukni na ikonu vedľa adresy › Povolenia › Mikrofón › Povoliť, potom ťukni znova.";
+  if (err.name === "NotFoundError") return "Telefón nenašiel mikrofón. Pripoj ho alebo skontroluj slúchadlá.";
+  if (err.name === "NotReadableError" || err.name === "AbortError") return "Mikrofón práve používa iná appka (hovor, diktafón). Ukonči ju a skús znova.";
+  if (err.name === "NotSupportedError" || !navigator.mediaDevices) return "Tento prehliadač nedovolí nahrávať zvuk. Otvor prekladač v aktuálnom Safari alebo Chrome.";
+  return "Mikrofón alebo zvuk sa nepodarilo spustiť. Skús znova.";
+}
+async function start(automatic = false, resume = automatic) {
   if (running || !user || !navigator.onLine) return;
   if (mode === "listen" ? chosenA === listenSource : chosenA === chosenB) { error("Vyber dva rôzne jazyky."); return; }
   if (mode !== "listen" && entries.length >= 1000) { error("Ulož rozhovor a začni nový."); return; }
@@ -848,14 +1005,14 @@ async function start(automatic = false) {
   const token = ++epoch; controls();
   try {
     await unlockAudio(automatic ? 400 : 0); if (epoch !== token) return;
-    await startCapture(token); if (epoch !== token || !running) return;
-    captureWatch = setInterval(() => { if (Date.now() - lastFrameAt > 4000) captureLost(token); }, 2000);
-    await lockScreen(); if (epoch !== token) return;
-    const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host); socket = ws; ws.binaryType = "arraybuffer";
+    // The connection (and the Soniox stream behind it) opens while the microphone is being set up; speech in between is buffered.
+    // An automatic reconnect and the Continue button resume the interrupted conversation (the server accepts that
+    // for 5 minutes); a conversation started again with the microphone counts against the daily limit.
+    const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + (resume ? "/?resume=1" : "/")); socket = ws; ws.binaryType = "arraybuffer";
     connectTimer = setTimeout(() => { if (socket === ws && !ready) connectionLost(); }, 12000);
     ws.onopen = () => {
       if (socket !== ws) { ws.close(); return; }
-      send({ type: "config", mode, ...(mode === "listen" ? { listen_source: listenSource } : {}), language_a: chosenA, language_b: chosenB, voice_a: voiceA, voice_b: voiceB, output_mode: outputMode(), tts_enabled: ttsEnabled(), tts_speed: prefs.ttsSpeed, profile_id: prefs.profileId, conversation_mode: microphoneMode() });
+      send({ type: "config", mode, ...(mode === "listen" ? { listen_source: listenSource } : {}), language_a: chosenA, language_b: chosenB, voice_a: voiceA, voice_b: voiceB, output_mode: outputMode(), tts_enabled: ttsEnabled(), tts_speed: prefs.ttsSpeed, profile_id: prefs.profileId, conversation_mode: microphoneMode(), client_version: APP_VERSION });
     };
     ws.onmessage = event => {
       if (socket !== ws) return;
@@ -863,10 +1020,13 @@ async function start(automatic = false) {
       catch { error("Neplatná odpoveď servera."); disconnect(); }
     };
     ws.onclose = event => { if (socket === ws) { if (event.code === 1000) disconnect(); else connectionLost(); } };
+    await startCapture(token); if (epoch !== token || !running || stopping) return;
+    captureWatch = setInterval(() => { if (Date.now() - lastFrameAt > 4000) captureLost(token); }, 2000);
+    void lockScreen();
   } catch (err) {
     if (epoch !== token) return;
     disconnect();
-    error(err.name === "NotAllowedError" ? "Povoľ mikrofón v nastaveniach prehliadača pre túto stránku." : err.name === "NotSupportedError" ? "Tento prehliadač nepodporuje nahrávanie zvuku. Použi aktuálny Chrome alebo Safari." : "Mikrofón alebo zvuk nie je dostupný.");
+    error(microphoneError(err));
   }
 }
 // Unexpected drop: keep the transcript and retry a few times while the page is visible and online.
@@ -878,7 +1038,14 @@ function connectionLost() {
     resumePending = true; error(navigator.onLine ? "Spojenie sa prerušilo. Prepis zostal zachovaný." : ""); controls(); return;
   }
   const delay = 1500 * 2 ** reconnectAttempts++;
-  reconnectTimer = setTimeout(() => { reconnectTimer = null; void start(true).catch(e => error(e.message)); }, delay);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    // An expired login signs out (keeping the transcript) instead of failing three more times.
+    const token = epoch;
+    void api("/api/session").catch(() => {}).then(() => {
+      if (user && epoch === token && !running && !userStopped && document.visibilityState === "visible") return start(true);
+    }).catch(e => error(e.message));
+  }, delay);
   controls();
 }
 async function pause() {
@@ -886,9 +1053,18 @@ async function pause() {
   if (stopping) return;
   haptic();
   if (!socket || socket.readyState !== WebSocket.OPEN) { disconnect(); return; }
-  stopping = true; controls(); await stopCapture(true);
+  const token = epoch, ws = socket;
+  // Frames already queued by the worklet still go out while it drains.
+  stopping = true; drainingStop = true; controls();
+  try { await stopCapture(true); } finally { drainingStop = false; }
+  // The connection may have ended (or a new one started) during the flush.
+  if (epoch !== token || socket !== ws) return;
   send({ type: "client_stop" });
-  finishTimer = setTimeout(() => { error("Dokončenie trvalo príliš dlho."); disconnect(); }, 125000);
+  clearTimeout(finishTimer);
+  finishTimer = setTimeout(() => { if (epoch === token) { error("Posledný preklad neprišiel včas. Text zostal zachovaný."); disconnect(); } }, 125000);
+  // Finishing usually takes a moment; after 8 s the user may end it at once.
+  clearTimeout(slowStopTimer);
+  slowStopTimer = setTimeout(() => { if (epoch === token && stopping) { finishSlow = true; controls(); } }, 8000);
 }
 // Synchronous on purpose: a hidden page may be frozen before any await resumes, so the stop
 // request and the short deadline are issued first. The server still finalizes the last sentence.
@@ -907,15 +1083,19 @@ function disconnect() {
   if (ws) { ws.onclose = null; ws.onerror = null; ws.onmessage = null; try { ws.close(); } catch {} }
   const changed = [];
   for (const item of entries) if (["queued", "pending"].includes(item.audio_status)) { item.audio_status = "not_spoken"; changed.push(item); }
-  running = false; stopping = false; ready = false; muted = false; serverState = "idle"; pttPressed = false; pttSide = ""; pttEnding = false; vadHits = 0;
+  finishSlow = false; clearTimeout(slowStopTimer);
+  running = false; stopping = false; ready = false; muted = false; serverState = "idle"; pttPressed = false; pttSide = ""; pttEnding = false; pttQueued = ""; pttQueuedFrames = []; pttQueuedBytes = 0; vadHits = 0;
   for (const side of ["A", "B"]) $("ptt" + side).classList.remove("pressed");
   render(changed); void stopCapture(false); stopSources(playback); playback = null; stopLocal();
   if (wakeLock) { void wakeLock.release(); wakeLock = null; }
   $("confirmLanguage").hidden = true; controls();
+  if (reloadOnIdle) setTimeout(maybeReload, 0);
 }
 function clearEntries() {
-  entries = []; audioCache.clear(); audioCacheBytes = 0; dirty = false; resumePending = false;
+  entries = []; audioCache.clear(); audioCacheBytes = 0; dirty = false; resumePending = false; announced = new Set();
+  $("announce").textContent = ""; $("announce").lang = "";
   renderAll(); controls();
+  if (reloadOnIdle) setTimeout(maybeReload, 0);
 }
 function asText(items = entries) { return items.map(i => name(i.source_language) + " → " + name(i.target_language) + (i.is_final ? "" : " [neúplné]") + "\n" + i.source_text + "\n" + i.translated_text).join("\n\n"); }
 
@@ -957,7 +1137,7 @@ async function showHistory() {
 $("sessionMode").addEventListener("click", event => {
   const button = event.target.closest("button[data-mode]");
   if (!button || button.disabled || running || stopping || reconnectTimer || mode === button.dataset.mode) return;
-  mode = button.dataset.mode;
+  mode = button.dataset.mode; error("");
   if (listenSource === chosenA) listenSource = "auto";
   saveSettings(); renderAll(); controls();
 });
@@ -992,6 +1172,7 @@ for (const group of document.querySelectorAll(".segmented[data-setting]")) {
 
 /* ---------- push to talk ---------- */
 function beginPtt(side) {
+  if (pttEnding && running && !stopping) { pttQueued = side; $("ptt" + side).classList.add("pressed"); return; }
   if (!running || !ready || stopping || pttPressed || pttEnding || microphoneMode() !== "ptt") return;
   if (playback || localPlayback) stopSound();
   pttPressed = true; pttSide = side; haptic();
@@ -999,6 +1180,8 @@ function beginPtt(side) {
   send({ type: "ptt_start" }); controls();
 }
 async function finishPtt(side) {
+  // A queued press released before the previous release finished was too short to hold speech.
+  if (pttQueued === side) { pttQueued = ""; pttQueuedFrames = []; pttQueuedBytes = 0; $("ptt" + side).classList.remove("pressed"); return; }
   if (!pttPressed || pttSide !== side) return;
   pttPressed = false; pttSide = ""; pttEnding = true; pttDraining = true;
   $("ptt" + side).classList.remove("pressed"); controls();
@@ -1013,6 +1196,8 @@ async function finishPtt(side) {
   }
   if (socket === ws) send({ type: "ptt_end" });
   pttEnding = false; controls();
+  const next = pttQueued, frames = pttQueuedFrames; pttQueued = ""; pttQueuedFrames = []; pttQueuedBytes = 0;
+  if (next) { $("ptt" + next).classList.remove("pressed"); beginPtt(next); if (pttPressed) for (const frame of frames) sendPcm(frame); }
 }
 for (const side of ["A", "B"]) {
   const button = $("ptt" + side);
@@ -1035,14 +1220,17 @@ $("loginForm").addEventListener("submit", async event => {
 });
 $("passkeyLoginBtn").addEventListener("click", () => { if (!passwordBusy) void passkeyLogin(); });
 $("passkeyBtn").addEventListener("click", () => {
-  $("settingsSheet").close(); $("passkeyStatus").textContent = ""; openSheet("passkeySheet");
+  $("settingsSheet").close(); $("passkeyStatus").textContent = ""; $("passkeyPassword").value = ""; openSheet("passkeySheet");
   void loadPasskeys().catch(err => { $("passkeyStatus").textContent = passkeyError(err); });
 });
 $("passkeyCreateBtn").addEventListener("click", () => void createPasskey());
 $("startBtn").addEventListener("click", () => (running ? pause() : start()).catch(e => error(e.message)));
-$("resumeBtn").addEventListener("click", () => start().catch(e => error(e.message)));
+$("resumeBtn").addEventListener("click", () => start(false, true).catch(e => error(e.message)));
 $("pttEndBtn").addEventListener("click", () => pause().catch(e => error(e.message)));
 $("stopAudioBtn").addEventListener("click", stopSound);
+$("finishNowBtn").addEventListener("click", () => { send({ type: "client_stop" }); disconnect(); });
+$("jumpBtn").addEventListener("click", () => { $("feed").scrollTop = $("feed").scrollHeight; $("jumpBtn").hidden = true; });
+$("feed").addEventListener("scroll", () => { const f = $("feed"); if (f.scrollHeight - f.scrollTop - f.clientHeight < 120) $("jumpBtn").hidden = true; });
 $("faceBtn").addEventListener("click", () => { faceMode = !faceMode; renderFace(); controls(); });
 $("errorClose").addEventListener("click", () => error(""));
 $("langABtn").addEventListener("click", () => openLanguages("A"));
@@ -1059,7 +1247,7 @@ $("profileId").addEventListener("change", event => { prefs.profileId = event.tar
 $("logoutBtn").addEventListener("click", () => void signOut());
 $("confirmLanguageBtn").addEventListener("click", () => send({ type: "confirm_language", language: $("detectedLanguage").value }));
 for (const d of document.querySelectorAll("dialog")) {
-  d.addEventListener("click", event => { if (event.target === d) d.close(); });
+  d.addEventListener("click", event => { if (event.target === d && !d.hasAttribute("data-persistent")) d.close(); });
   d.querySelector(".close-sheet")?.addEventListener("click", () => d.close());
   // A toast shown inside a sheet that closes right after (copy, save) must stay visible.
   d.addEventListener("close", () => { const t = $("toast"); if (d.contains(t)) (Array.from(document.querySelectorAll("dialog[open]")).at(-1) || document.body).append(t); });
@@ -1106,7 +1294,7 @@ $("copyBtn").addEventListener("click", () => {
 $("saveBtn").addEventListener("click", async () => {
   if (!entries.length) { toast("Rozhovor je prázdny."); return; }
   const snapshot = JSON.stringify(entries), owner = user;
-  try { await LocalHistory.save(owner, entries, { a: chosenA, b: chosenB }); if (user === owner && snapshot === JSON.stringify(entries)) dirty = false; toast("Uložené v tomto zariadení."); closeSheets(); }
+  try { await LocalHistory.save(owner, entries, { a: chosenA, b: chosenB }); if (user === owner && snapshot === JSON.stringify(entries)) dirty = false; toast("Uložené v tomto zariadení."); closeSheets(); if (reloadOnIdle) setTimeout(maybeReload, 3500); }
   catch (err) { error(err.message); }
 });
 $("historyBtn").addEventListener("click", () => showHistory().catch(e => error(e.message)));
@@ -1114,7 +1302,7 @@ $("historyBtn").addEventListener("click", () => showHistory().catch(e => error(e
 function connectivity() {
   $("offlineBanner").hidden = navigator.onLine;
   if (!navigator.onLine && running) connectionLost();
-  else if (navigator.onLine && resumePending && !running && document.visibilityState === "visible" && reconnectAttempts < 3) { reconnectAttempts++; void start(true).catch(() => {}); }
+  else if (navigator.onLine && resumePending && !running && !userStopped && document.visibilityState === "visible" && reconnectAttempts < 3) { reconnectAttempts++; void start(true).catch(() => {}); }
   controls();
 }
 window.addEventListener("online", connectivity); window.addEventListener("offline", connectivity);
@@ -1122,6 +1310,7 @@ document.addEventListener("visibilitychange", () => {
   // Mobile browsers suspend the microphone in the background: finish cleanly and offer one-tap resume.
   if (document.visibilityState === "hidden" && running) backgroundStop();
   else if (document.visibilityState === "visible" && running && !wakeLock) void lockScreen();
+  else if (document.visibilityState === "visible") maybeReload();
 });
 window.addEventListener("pagehide", () => { send({ type: "client_stop" }); disconnect(); });
 window.addEventListener("beforeunload", event => { if (dirty) { event.preventDefault(); event.returnValue = ""; } });
@@ -1137,5 +1326,20 @@ setInterval(async () => {
     controls();
   } catch {}
 }, 600000);
-api("/api/session").then(showApp).catch(() => { $("loginShell").hidden = false; $("appShell").hidden = true; }).finally(() => { void initPasskeys(); });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+api("/api/session").then(showApp).catch(err => {
+  $("loginShell").hidden = false; $("appShell").hidden = true;
+  // A missing login is normal; anything else (network, catalog) is shown.
+  if (err?.status !== 401) $("loginStatus").textContent = err?.message || OFFLINE_MESSAGE;
+}).finally(() => { void initPasskeys(); });
+if ("serviceWorker" in navigator) {
+  // The first install also fires controllerchange; only a replaced worker means a new version.
+  // After that first takeover this page has a worker too, so later updates while it stays open do count.
+  let hadController = Boolean(navigator.serviceWorker.controller);
+  navigator.serviceWorker.addEventListener?.("controllerchange", () => {
+    if (!hadController) { hadController = true; return; }
+    reloadOnIdle = true;
+    if (running || dirty) toast("Nová verzia appky sa načíta po skončení a uložení rozhovoru.");
+    maybeReload();
+  });
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}

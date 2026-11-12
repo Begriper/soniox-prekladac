@@ -1,13 +1,14 @@
 'use strict';
-const CACHE = 'translator-shell-3.5.0';
+const CACHE = 'translator-shell-3.6.1';
 const SHELL = [
   '/', '/index.html',
-  '/style.css?v=3.5.0', '/app.js?v=3.5.0', '/history.js?v=3.5.0',
-  '/audio-capture-worklet.js?v=3.5.0', '/manifest.webmanifest?v=3.5.0',
-  '/icon.svg?v=3.5.0', '/icon-180.png?v=3.5.0', '/icon-192.png?v=3.5.0',
-  '/icon-512.png?v=3.5.0', '/icon-maskable-512.png?v=3.5.0',
+  '/style.css?v=3.6.1', '/app.js?v=3.6.1', '/history.js?v=3.6.1',
+  '/audio-capture-worklet.js?v=3.6.1', '/manifest.webmanifest?v=3.6.1',
+  '/icon.svg?v=3.6.1', '/icon-180.png?v=3.6.1', '/icon-192.png?v=3.6.1',
+  '/icon-512.png?v=3.6.1', '/icon-maskable-512.png?v=3.6.1',
   '/fonts/Manrope-variable.ttf'
 ];
+const OWN_VERSION = new RegExp('\\?v=' + CACHE.slice('translator-shell-'.length).replace(/\./g, '\\.') + '(?![\\w.+-])');
 self.addEventListener('install', event => event.waitUntil((async () => {
   const cache = await caches.open(CACHE);
   await cache.addAll(SHELL);
@@ -33,7 +34,10 @@ self.addEventListener('fetch', event => {
       try { response = await fetch(event.request); }
       catch { return await cache.match('/index.html') || Response.error(); }
       if (!response.ok) return await cache.match('/index.html') || response;
-      store(cache, '/index.html', response.clone());
+      // An older worker must never keep HTML of a newer release: its offline copy would reference scripts this cache lacks.
+      // The whole version must match: "?v=3.6.1" is also the start of "?v=3.6.10".
+      const copy = response.clone();
+      event.waitUntil(copy.text().then(html => OWN_VERSION.test(html) ? cache.put('/index.html', new Response(html, { headers: copy.headers })) : undefined).catch(() => {}));
       return response;
     }
     // Exact versioned URLs are immutable; never fall back to another cache or URL.

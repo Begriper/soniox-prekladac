@@ -26,11 +26,25 @@ test("the same login takes over its own conversation after a silent network drop
   second.close(); first.terminate();
 });
 
-test("another login of the same user is still refused while a conversation runs", async t => {
+test("another login of the same user is still refused while a conversation runs, with a readable reason", async t => {
   const f = await fixture(); t.after(f.close);
   const first = await f.connect(await f.login()); await ready(first);
-  assert.equal(await refused(f, await f.login()), 409);
+  // The phone gets a typed error instead of a bare 409 that looks like a dropped network.
+  const second = await f.connect(await f.login(), null);
+  await until(() => second.messages.some(m => m.type === "error"));
+  const err = second.messages.find(m => m.type === "error");
+  assert.equal(err.code, "busy_elsewhere"); assert.equal(err.fatal, true);
+  await until(() => second.readyState === WebSocket.CLOSED);
+  assert.equal(f.runtime.conversations.size, 1, "the running conversation is untouched");
   first.close();
+});
+
+test("a client of another app version is told to update", async t => {
+  const f = await fixture(); t.after(f.close);
+  const ws = await f.connect(await f.login(), { language_a: "sk", language_b: "de", client_version: "0.0.1" });
+  await until(() => ws.messages.some(m => m.code === "client_outdated"));
+  const current = await f.connect(await f.login(), { language_a: "sk", language_b: "de", client_version: require("../package.json").version });
+  await ready(current); current.close();
 });
 
 test("a reconnect within the resume window does not use another daily session", async t => {
@@ -39,9 +53,13 @@ test("a reconnect within the resume window does not use another daily session", 
   const first = await f.connect(cookie); await ready(first);
   first.close();
   await until(() => f.runtime.conversations.size === 0);
-  const second = await f.connect(cookie); await ready(second);
+  const second = await f.connect(cookie, undefined, "/?resume=1"); await ready(second);
   second.close();
   await until(() => f.runtime.conversations.size === 0);
+  // A conversation the user starts again is a new one, also within the resume window.
+  const fresh = await f.connect(cookie);
+  await until(() => fresh.messages.some(m => m.type === "error"));
+  assert.equal(fresh.messages.find(m => m.type === "error").code, "quota_exceeded");
   // A different login has no conversation to resume and gets a readable quota error.
   const other = await f.connect(await f.login());
   await until(() => other.messages.some(m => m.type === "error"));
@@ -67,9 +85,15 @@ test("transient Soniox errors are retryable and credit problems are final", asyn
   const f = await fixture(); t.after(f.close);
   const cookie = await f.login();
   const first = await f.connect(cookie); await ready(first);
-  f.stt.at(-1).send(JSON.stringify({ error_code: 503, error_type: "service_unavailable", error_message: "busy", request_id: "req-1" }));
+  // A transient error reopens the Soniox stream inside the same conversation, up to twice a minute.
+  for (let i = 1; i <= 2; i++) {
+    f.stt.at(-1).send(JSON.stringify({ error_code: 503, error_type: "service_unavailable", error_message: "busy", request_id: "req-" + i }));
+    await until(() => f.stt.length === i + 1 && f.configs.length === i + 1);
+  }
+  assert.equal(f.runtime.conversations.size, 1); assert.ok(!first.messages.some(m => m.type === "error"));
+  f.stt.at(-1).send(JSON.stringify({ error_code: 503, error_type: "service_unavailable", error_message: "busy", request_id: "req-3" }));
   await until(() => first.messages.some(m => m.type === "error"));
-  assert.equal(first.messages.find(m => m.type === "error").code, "stt_retry");
+  assert.equal(first.messages.find(m => m.type === "error").code, "stt_retry", "then the client's reconnect takes over");
   await until(() => f.runtime.conversations.size === 0);
   const second = await f.connect(cookie); await ready(second);
   f.stt.at(-1).send(JSON.stringify({ error_code: 402, error_message: "no balance" }));
