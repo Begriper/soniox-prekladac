@@ -9,6 +9,28 @@ fly ssh sftp get /data/backups/usage-<dátum>.sqlite ./zalohy/
 
 Skript vytvorí konzistentnú kópiu cez `VACUUM INTO` aj počas behu appky a na volume nechá posledných 7. Súbor obsahuje hashe hesiel, prístupové kľúče a audit, preto ho ukladaj šifrovane. Obnovu vyskúšaj aspoň raz: lokálne nastav `USAGE_DB_PATH` na stiahnutý súbor a spusti `npm start`.
 
+Pozor v Git Bash na Windows: cestu `/data/...` prepíše na cestu vo Windows. Pred príkaz pridaj `MSYS_NO_PATHCONV=1`, alebo ho spusti v PowerShelli.
+
+# Verzia 3.6.1 — release 54, 2026-11-12
+
+Na výslovné schválenie používateľa zlúčený PR #15 a nasadený `main` (merge commit `3b4f26d`): model `stt-rt-v6`, hlas pripravený vopred v režime Reproduktor, obnova rozpoznávania v relácii, odolnejší klient, prísnejšie limity prihlásenia a nákladov, logy `session_end`, `backup-db.js`, väčšie písmo a prístupnosť. Podrobnosti: `docs/implementacia-2026-11.md`, `docs/kontrola-fable-2026-11.md`. Fly remote builder, iba existujúca Machine `8e2135b77993d8` vo `fra`; volume `vol_rnzld90dqg7mypkr` zostal pripojený, secrets sa nemenili.
+
+- Snapshot volume pred deployom: `vs_2QGOxy9OY4jHkzKlPkX3ZQ` (retencia 5 dní).
+- Kópia databázy mimo Fly po deployi: `/data/backups/usage-2026-11-12T19-12-55-008Z.sqlite`, stiahnutá do `zalohy/` v hlavnom priečinku projektu (127 kB, `PRAGMA integrity_check` ok). Nie je šifrovaná; uložiť šifrovane.
+- Aktuálny image: `registry.fly.io/soniox-prekladac:deployment-01M78JQED9ABEDMQBPMRSF2RZ7`
+- Predchádzajúci image na rollback: `registry.fly.io/soniox-prekladac:deployment-01M5WRZGX0GBDF5Y00ZMQW31ZR` (v53)
+- Pred deployom: CI (Node 24) zelené; lokálne `npm run check`, 237/237 testov a `npm audit --omit=dev` 0 nálezov (Node 22.14); Codex review a adversarial review opravené, posledné prechody bez nálezov; skutočný test so Sonioxom na Galaxy S24 Ultra (Reproduktor: bežná veta, veta nad 20 s, veta s nemeckým slovom; latencia medián 273 ms).
+- Po deployi: release v54, health check `1 passing`, log `Translator 3.6.1 listening on 8080`; na serveri `stt-rt-v6` a `tts-rt-v2`; `/api/config` 3.6.1; cache `translator-shell-3.6.1`; HTML iba `?v=3.6.1`, súbory 200; `/backup-db.js` cez HTTP 404; `/api/session`, `/api/passkeys`, `/api/diagnostics` 401, `/api/admin/users` 403; POST `/api/login` s cudzím Origin 403; WebSocket bez cookie 401; CSP a HSTS prítomné.
+- Neoverené: prvý skutočný rozhovor na produkcii a riadok `session_end` v `fly logs` (objaví sa po prvom rozhovore); Počúvanie, Slúchadlá a PTT po opravách. Overí používateľ.
+- Otvorená appka 3.5.0 sa pri ďalšom štarte rozhovoru sama obnoví (`client_outdated`), alebo po zatvorení a otvorení.
+- Rollback na v53 je bezpečný: databáza nemá nové tabuľky a starý server ignoruje katalóg uložený pre v6. Po 15. 12. 2026 však aj 3.5.0 pobeží na v6 (Soniox v5 presmeruje).
+
+```powershell
+fly deploy --app soniox-prekladac --image registry.fly.io/soniox-prekladac:deployment-01M5WRZGX0GBDF5Y00ZMQW31ZR --only-machines 8e2135b77993d8 --update-only --strategy immediate --yes
+```
+
+---
+
 # Verzia 3.5.0 — release 53, 2026-10-26
 
 Na výslovné schválenie používateľa zlúčený PR #14 a nasadený `main` (merge commit `faa768f`): režim Počúvanie (prepínač Konverzácia | Počúvanie, zdroj zvolený alebo Auto, jednosmerný preklad do jazyka A, samostatné prepínače Titulky a Hlas, plný duplex, plynulé pokračovanie po 30-min limite, nečinnosť 5 min). Fly remote builder, iba existujúca Machine `8e2135b77993d8` vo `fra`; volume `vol_rnzld90dqg7mypkr` zostal pripojený, secrets sa nemenili.
