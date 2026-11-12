@@ -1,3 +1,14 @@
+# Záloha databázy (od 3.6.0)
+
+Fly snapshoty volume (5 dní) chránia iba pred chybou disku v tom istom regióne. Raz týždenne a pred každým nasadením urob kópiu mimo Fly:
+
+~~~sh
+fly ssh console -C "node /app/backup-db.js"
+fly ssh sftp get /data/backups/usage-<dátum>.sqlite ./zalohy/
+~~~
+
+Skript vytvorí konzistentnú kópiu cez `VACUUM INTO` aj počas behu appky a na volume nechá posledných 7. Súbor obsahuje hashe hesiel, prístupové kľúče a audit, preto ho ukladaj šifrovane. Obnovu vyskúšaj aspoň raz: lokálne nastav `USAGE_DB_PATH` na stiahnutý súbor a spusti `npm start`.
+
 # Verzia 3.5.0 — release 53, 2026-10-26
 
 Na výslovné schválenie používateľa zlúčený PR #14 a nasadený `main` (merge commit `faa768f`): režim Počúvanie (prepínač Konverzácia | Počúvanie, zdroj zvolený alebo Auto, jednosmerný preklad do jazyka A, samostatné prepínače Titulky a Hlas, plný duplex, plynulé pokračovanie po 30-min limite, nečinnosť 5 min). Fly remote builder, iba existujúca Machine `8e2135b77993d8` vo `fra`; volume `vol_rnzld90dqg7mypkr` zostal pripojený, secrets sa nemenili.

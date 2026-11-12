@@ -15,7 +15,7 @@ const { synthesizeRest } = require("./tts-rest");
 const { STT_MODEL, TTS_MODEL } = require("./runtime-models");
 const { normalizeTtsTransport } = require("./tts-transport");
 const { parseCookies, equal, validOrigin, clientIp, WindowLimiter } = require("./security");
-const APP_VERSION = "3.5.0";
+const APP_VERSION = "3.6.1";
 const COOKIE = "sl_session";
 const RESUME_WINDOW_MS = 5 * 60000;
 const MAX_LOGINS_PER_USER = 10;
@@ -24,10 +24,17 @@ function number(env, key, fallback, min = 1, max = 1e12) {
   if (!Number.isFinite(value) || value < min || value > max) throw new Error("Invalid configuration: " + key);
   return value;
 }
+// One JSON line per event goes to stdout (visible in `fly logs`). Never conversation text, never a readable username.
+function logEvent(env, event, data = {}) {
+  if (env.LOG_EVENTS === "false") return;
+  try { console.log(JSON.stringify({ event, at: new Date().toISOString(), ...data })); } catch { /* Logging must never break the app. */ }
+}
 function createApplication(env = process.env) {
   const production = env.NODE_ENV === "production";
   if (!env.SONIOX_API_KEY) throw new Error("SONIOX_API_KEY is required");
   const secret = env.SESSION_SECRET || (production ? "" : crypto.randomBytes(32).toString("hex"));
+  // Short keyed hash for logs: the same person is recognisable across lines, the name or IP is not readable.
+  const tag = value => crypto.createHmac("sha256", secret || "log").update("log:" + String(value)).digest("hex").slice(0, 8);
   if (secret.length < 32) throw new Error("SESSION_SECRET must contain at least 32 characters");
   const users = (env.APP_ACCESS_CODES || "").split(",").filter(Boolean).map(part => {
     const i = part.indexOf(":");
@@ -65,15 +72,23 @@ function createApplication(env = process.env) {
   const limits = {
     sessions: number(env, "MAX_USER_SESSIONS_PER_DAY", 20),
     audioBytes: number(env, "MAX_USER_AUDIO_MB_PER_DAY", 250) * 1024 * 1024,
-    ttsRequests: number(env, "MAX_USER_TTS_REQUESTS_PER_DAY", 600),
+    // Every spoken sentence is at least one request: an hour of listening with voice needs about 600.
+    // The cost is bounded by the character and audio limits, so this only stops a runaway loop.
+    ttsRequests: number(env, "MAX_USER_TTS_REQUESTS_PER_DAY", 3000),
     ttsAudioBytes: number(env, "MAX_USER_TTS_AUDIO_MB_PER_DAY", 160) * 1024 * 1024,
     ttsChars: number(env, "MAX_USER_TTS_CHARS_PER_DAY", 200000),
     sttSeconds: number(env, "MAX_USER_STT_MINUTES_PER_DAY", 180) * 60,
+    // About 30 hours of recognition per account and month unless an admin sets another value.
+    sttSecondsMonth: number(env, "MAX_USER_STT_MINUTES_PER_MONTH", 1800) * 60,
+  };
+  const globalLimits = {
+    sttSeconds: number(env, "MAX_TOTAL_STT_MINUTES_PER_DAY", 600) * 60,
+    ttsChars: number(env, "MAX_TOTAL_TTS_CHARS_PER_DAY", 600000),
   };
   const sessionLimits = {
     sessionMs: number(env, "MAX_SESSION_MINUTES", 30) * 60000,
     sessionAudioBytes: number(env, "MAX_AUDIO_MB_PER_SESSION", 75) * 1024 * 1024,
-    sessionTtsRequests: number(env, "MAX_TTS_REQUESTS_PER_SESSION", 120),
+    sessionTtsRequests: number(env, "MAX_TTS_REQUESTS_PER_SESSION", 300),
     sessionTtsBytes: number(env, "MAX_TTS_AUDIO_MB_PER_SESSION", 80) * 1024 * 1024,
     idleMs: number(env, "IDLE_TIMEOUT_SECONDS", 120) * 1000,
     listenIdleMs: number(env, "LISTEN_IDLE_TIMEOUT_SECONDS", 300) * 1000,
@@ -87,11 +102,12 @@ function createApplication(env = process.env) {
   const ttl = number(env, "SESSION_TTL_MINUTES", 43200, 1, 43200) * 60000;
   const maxTotal = number(env, "MAX_ACTIVE_WS_TOTAL", 3, 1, 100);
   const maxIp = number(env, "MAX_ACTIVE_WS_PER_IP", 2, 1, 100);
-  const store = new UsageStore(env.USAGE_DB_PATH || (production ? "/data/usage.sqlite" : path.join(__dirname, ".local-data", "usage.sqlite")), limits);
+  const store = new UsageStore(env.USAGE_DB_PATH || (production ? "/data/usage.sqlite" : path.join(__dirname, ".local-data", "usage.sqlite")), limits, globalLimits);
   const catalog = new Catalog({ store, apiKey: env.SONIOX_API_KEY, urls: { stt: urls.sttModels, tts: urls.ttsModels, shared: urls.sharedVoices, custom: urls.customVoices }, ownerUsername, ownerVoiceName: env.APP_OWNER_VOICE_NAME || "my voice" });
   const conversations = new Map(), previews = new Map(), upgrading = new Map(), summaries = new Map(), recentSessions = new Map();
   const loginIp = new WindowLimiter(number(env, "MAX_LOGIN_ATTEMPTS", 8), 600000);
-  const loginGlobal = new WindowLimiter(100, 600000, 1);
+  // Global and per-account budgets count failures only; the owner's break-glass code is never locked out by them.
+  const loginGlobal = new WindowLimiter(number(env, "MAX_LOGIN_FAILURES_TOTAL", 200), 600000, 1);
   const loginUsername = new WindowLimiter(10, 600000);
   const previewRate = new WindowLimiter(number(env, "MAX_PREVIEW_TTS_REQUESTS_PER_HOUR", 20), 3600000);
   let dummyHash;
@@ -192,17 +208,31 @@ function createApplication(env = process.env) {
   app.get("/api/config", (req, res) => res.json({ appVersion: APP_VERSION, requiresLogin: true, loggedIn: Boolean(session(req)), defaultVoice: "Adrian", defaultEndpointDelayMs: endpoint.delay, ttsModel: TTS_MODEL, profiles: Object.entries(PROFILES).map(([id, value]) => ({ id, label: value.label })) }));
   app.post("/api/login", route(async (req, res) => {
     const ip = clientIp(req, env.TRUST_FLY_PROXY === "true" && Boolean(env.FLY_APP_NAME));
-    if (!loginIp.allow(ip) || !loginGlobal.allow("all")) return res.status(429).json({ error: "Príliš veľa pokusov. Skús neskôr." });
+    const tooMany = reason => { logEvent(env, "login_limited", { ip: tag(ip), reason }); return res.status(429).json({ error: "Príliš veľa pokusov. Skús neskôr." }); };
+    if (!loginIp.allow(ip)) return tooMany("ip");
     const legacy = req.body?.username === undefined && req.body?.password === undefined;
     const username = typeof req.body?.username === "string" ? req.body.username.trim() : "";
     const password = legacy ? req.body?.code : req.body?.password;
+    // The code-only login tries every account, so all such attempts share one small budget.
+    const accountKey = legacy ? "*code-only*" : username;
     const denied = () => res.status(401).json({ error: "Nesprávne meno alebo heslo, alebo je účet zablokovaný." });
-    if (!legacy && !loginUsername.allow(username)) return res.status(429).json({ error: "Príliš veľa pokusov. Skús neskôr." });
-    if (typeof password !== "string" || password.length > 512 || (!legacy && !/^[\w.-]{1,40}$/.test(username))) return denied();
+    // Attempts are counted before the slow password check and given back on success,
+    // so parallel requests cannot all pass the budget check at once.
+    let counted = false;
+    const failed = reason => {
+      if (!counted) { loginGlobal.hit("all"); loginUsername.hit(accountKey); }
+      logEvent(env, "login_failed", { ip: tag(ip), user: tag(accountKey), reason });
+      return denied();
+    };
+    if (typeof password !== "string" || password.length > 512 || (!legacy && !/^[\w.-]{1,40}$/.test(username))) return failed("invalid");
     const pw = legacy ? password.trim() : password;
     const owner = users.find(u => u.username === ownerUsername);
+    const breakGlass = Boolean(owner && (legacy || username === ownerUsername) && equal(owner.code, pw));
+    if (!breakGlass && loginGlobal.blocked("all")) return tooMany("global");
+    if (!breakGlass && loginUsername.blocked(accountKey)) return tooMany("account");
+    if (!breakGlass) { loginGlobal.hit("all"); loginUsername.hit(accountKey); counted = true; }
     let user;
-    if (owner && (legacy || username === ownerUsername) && equal(owner.code, pw)) {
+    if (breakGlass) {
       user = store.getUser(ownerUsername);
       const recovering = !user || user.disabled_at || user.role !== "admin";
       if (!user) {
@@ -224,11 +254,22 @@ function createApplication(env = process.env) {
     // Re-read after async scrypt: an admin may have disabled the account meanwhile.
     const verified = user;
     user = user && store.getUser(user.username);
-    if (verified && user && (verified.password_hash !== user.password_hash || verified.created_at !== user.created_at)) return denied();
-    if (!user || user.disabled_at) return denied();
+    if (verified && user && (verified.password_hash !== user.password_hash || verified.created_at !== user.created_at)) return failed("changed");
+    if (!user || user.disabled_at) return failed(user ? "disabled" : "wrong");
+    if (counted) { loginGlobal.release("all"); loginUsername.release(accountKey); }
+    // Shows whether anyone still uses the old code-only login before it is removed.
+    logEvent(env, "login", { user: tag(user.username), method: breakGlass ? "break_glass" : legacy ? "code_only" : "password" });
     finishLogin(req, res, user);
   }));
-  installPasskeyApi(app, { store, requireSession, finishLogin, origins, secret, production, env });
+  // Adding a passkey asks for the password again: a stolen session cookie alone must not plant a lasting login.
+  async function confirmPassword(username, pw) {
+    if (typeof pw !== "string" || !pw || pw.length > 512) return false;
+    const owner = users.find(u => u.username === ownerUsername);
+    if (owner && username === ownerUsername && equal(owner.code, pw)) return true;
+    const user = store.getUser(username);
+    return Boolean(user && !user.disabled_at && await verifyPassword(pw, user.password_hash));
+  }
+  installPasskeyApi(app, { store, requireSession, finishLogin, origins, secret, production, env, confirmPassword, logEvent: (event, data) => logEvent(env, event, data), tag });
   app.get("/api/session", requireSession, (req, res) => res.json({ authenticated: true, username: req.auth.username, role: req.auth.role, expires_at: new Date(req.auth.expiresAt).toISOString(), usage: usage(req.auth.username) }));
   app.post("/api/logout", (req, res) => {
     const auth = session(req); if (auth) destroy(auth.id);
@@ -253,7 +294,7 @@ function createApplication(env = process.env) {
     res.on("close", disconnect);
     try {
       const language = req.body?.language || "sk", voice = req.body?.voice || "Adrian";
-      await catalog.ensureVoices();
+      await catalog.ensureVoices(voice);
       if (abort.signal.aborted || !session(req)) {
         if (!res.destroyed) res.status(401).json({ error: "Najprv sa prihlás." });
         return;
@@ -261,10 +302,12 @@ function createApplication(env = process.env) {
       if (!catalog.hasVoiceFor(username, voice) || !catalog.canSpeak(language)) return res.status(400).json({ error: "Hlas alebo jazyk nie je dostupný." });
       const phrases = { sk: "Dobrý deň. Toto je ukážka hlasu.", de: "Guten Tag. Dies ist eine Stimmprobe.", es: "Hola. Esta es una muestra de voz.", en: "Hello. This is a voice sample." };
       const text = phrases[language] || "1, 2, 3.";
+      if (store.remaining(username, "ttsAudioBytes") <= 0) return res.status(429).json({ error: "Denný limit hlasu je vyčerpaný. Obnoví sa o polnoci UTC." });
       if (!store.reserve(username, { ttsRequests: 1, ttsChars: [...text].length, previewTtsRequests: 1 })) return res.status(429).json({ error: "Denný limit hlasu." });
       const buffer = await synthesizeRest({ url: urls.ttsRest, apiKey: env.SONIOX_API_KEY, clientReferenceId: username, text, language, voice, signal: abort.signal });
+      // Soniox has billed the audio at this point: it is always recorded and delivered.
+      store.record(username, { ttsAudioBytes: buffer.length });
       if (abort.signal.aborted || !session(req)) return;
-      if (!store.reserve(username, { ttsAudioBytes: buffer.length })) return res.status(429).json({ error: "Denný limit audia." });
       res.type("application/octet-stream").send(buffer);
     } catch (error) {
       if (!abort.signal.aborted) throw error;
@@ -291,7 +334,7 @@ function createApplication(env = process.env) {
     const disconnect = () => { if (!res.writableEnded) abort.abort(); };
     res.on("close", disconnect);
     try {
-      await catalog.ensureVoices();
+      await catalog.ensureVoices(voice);
       if (abort.signal.aborted || !session(req)) {
         if (!res.destroyed) res.status(401).json({ error: "Najprv sa prihlás." });
         return;
@@ -300,10 +343,12 @@ function createApplication(env = process.env) {
           !catalog.hasVoiceFor(username, voice) || !catalog.canSpeak(language, text)) {
         return res.status(400).json({ error: "Neplatný alebo príliš dlhý text hlasu." });
       }
+      if (store.remaining(username, "ttsAudioBytes") <= 0) return res.status(429).json({ error: "Denný limit hlasu je vyčerpaný. Obnoví sa o polnoci UTC." });
       if (!store.reserve(username, { ttsRequests: 1, ttsChars: [...text].length })) return res.status(429).json({ error: "Denný limit hlasu." });
       const buffer = await synthesizeRest({ url: urls.ttsRest, apiKey: env.SONIOX_API_KEY, clientReferenceId: username, text, language, voice, speed, signal: abort.signal });
+      // Soniox has billed the audio at this point: it is always recorded and delivered.
+      store.record(username, { ttsAudioBytes: buffer.length });
       if (abort.signal.aborted || !session(req)) return;
-      if (!store.reserve(username, { ttsAudioBytes: buffer.length })) return res.status(429).json({ error: "Denný limit audia." });
       res.type("application/octet-stream").send(buffer);
     } catch (error) {
       if (!abort.signal.aborted) throw error;
@@ -315,31 +360,48 @@ function createApplication(env = process.env) {
     }
   }));
   app.use(express.static(path.join(__dirname, "public"), { maxAge: 0, etag: true }));
-  app.use((_err, _req, res, _next) => {
-    if (!res.headersSent) res.status(503).json({ error: "Operácia nie je dostupná. Skús znova." });
+  app.use((err, _req, res, _next) => {
+    if (res.headersSent) return;
+    if (err?.type === "entity.too.large") return res.status(413).json({ error: "Požiadavka je príliš veľká." });
+    if (err?.type === "entity.parse.failed") return res.status(400).json({ error: "Neplatná požiadavka." });
+    logEvent(env, "request_error", { error: String(err?.message || err).slice(0, 200) });
+    res.status(503).json({ error: "Operácia nie je dostupná. Skús znova." });
   });
   function reject(socket, status) { socket.end("HTTP/1.1 " + status + " Rejected\r\nConnection: close\r\n\r\n"); }
+  // A bare HTTP refusal looks like a dropped network to the phone; accepting first lets it show the real reason.
+  function refuse(req, socket, head, code, message) {
+    wss.handleUpgrade(req, socket, head, client => {
+      client.on("error", () => client.terminate());
+      const id = crypto.randomUUID();
+      client.send(JSON.stringify({ type: "session_open", conversation_id: id }));
+      client.send(JSON.stringify({ type: "error", code, fatal: true, message, conversation_id: id }));
+      client.close(4000, code);
+    });
+  }
   server.on("upgrade", (req, socket, head) => {
     void (async () => {
       socket.on("error", () => socket.destroy());
       try {
         await ready;
         if (socket.destroyed) return;
-        if (req.url !== "/" || !validOrigin(req, origins)) return reject(socket, 403);
+        const target = new URL(req.url, "http://localhost");
+        if (target.pathname !== "/" || [...target.searchParams.keys()].some(k => k !== "resume") || !validOrigin(req, origins)) return reject(socket, 403);
         const auth = session(req); if (!auth) return reject(socket, 401);
         const ip = clientIp(req, env.TRUST_FLY_PROXY === "true" && Boolean(env.FLY_APP_NAME));
-        await catalog.ensureVoices();
+        await catalog.ensureVoices("", auth.username);
         if (socket.destroyed) return;
         if (!session(req)) return reject(socket, 401);
-        if (previews.has(auth.username)) return reject(socket, 409);
+        if (previews.has(auth.username)) return refuse(req, socket, head, "preview_running", "Najprv počkaj na koniec ukážky hlasu a skús znova.");
         // A phone that lost signal reconnects before the server notices the dead socket;
         // the same login takes over its own conversation instead of being refused.
-        let resumed = Date.now() - (recentSessions.get(auth.id) ?? -Infinity) < RESUME_WINDOW_MS;
+        // The app asks to resume on its automatic reconnect and on the Continue button after an interruption;
+        // a conversation the user starts again with the microphone counts as a new one.
+        let resumed = target.searchParams.get("resume") === "1" && Date.now() - (recentSessions.get(auth.id) ?? -Infinity) < RESUME_WINDOW_MS;
         for (const c of [...conversations.values()]) if (c.auth.id === auth.id) { c.end("Rozhovor pokračuje v novom spojení.", "replaced"); resumed = true; }
         if (conversations.size + upgrading.size >= maxTotal ||
-            [...conversations.values()].filter(c => c.ip === ip).length + [...upgrading.values()].filter(c => c.ip === ip).length >= maxIp) return reject(socket, 429);
+            [...conversations.values()].filter(c => c.ip === ip).length + [...upgrading.values()].filter(c => c.ip === ip).length >= maxIp) return refuse(req, socket, head, "server_busy", "Server má teraz plno, bežia iné rozhovory. Skús to o chvíľu.");
         if ([...conversations.values()].some(c => c.auth.username === auth.username) ||
-            [...upgrading.values()].some(c => c.username === auth.username)) return reject(socket, 409);
+            [...upgrading.values()].some(c => c.username === auth.username)) return refuse(req, socket, head, "busy_elsewhere", "Tvoj účet má rozhovor otvorený na inom zariadení. Ukonči ho tam a skús znova.");
         upgrading.set(socket, { username: auth.username, ip });
         socket.once("close", () => upgrading.delete(socket));
         // Reconnects within the resume window continue the same conversation and do not count as a new session.
@@ -353,15 +415,18 @@ function createApplication(env = process.env) {
             // Accepting first lets the client show the real reason instead of a generic connection error.
             const id = crypto.randomUUID();
             client.send(JSON.stringify({ type: "session_open", conversation_id: id }));
-            client.send(JSON.stringify({ type: "error", code: "quota_exceeded", fatal: true, message: "Denný limit rozhovorov bol vyčerpaný.", conversation_id: id }));
+            client.send(JSON.stringify({ type: "error", code: "quota_exceeded", fatal: true, message: "Denný limit rozhovorov je vyčerpaný. Obnoví sa o polnoci UTC.", conversation_id: id }));
             return client.close(4000, "quota_exceeded");
           }
           try {
             const conversation = new SpeechSession(client, {
-              auth, ip, store, catalog, apiKey: env.SONIOX_API_KEY, urls, limits: sessionLimits,
+              auth, ip, store, catalog, apiKey: env.SONIOX_API_KEY, urls, limits: sessionLimits, appVersion: APP_VERSION,
               endpoint, transport: normalizeTtsTransport(env.TTS_TRANSPORT),
               onClose: summary => {
                 conversations.delete(client); summaries.set(auth.username, summary); recentSessions.set(auth.id, Date.now());
+                logEvent(env, "session_end", { session: summary.id, user: tag(auth.username), end_code: summary.end_code, duration_ms: summary.duration_ms,
+                  languages: summary.language_a + ">" + summary.language_b, profile: summary.profile, stt_seconds: summary.stt_seconds, tts_chars: summary.tts_chars, tts_requests: summary.tts_requests,
+                  audio_bytes: summary.audio_bytes, tts_audio_bytes: summary.tts_audio_bytes, latency_median_ms: summary.latency_median_ms, latency: summary.latency, provider_error: summary.provider_error });
                 try { store.recordConversation(auth.username, summary); } catch { /* Logging must not prevent cleanup. */ }
               },
             });
@@ -387,7 +452,11 @@ function createApplication(env = process.env) {
   cleanup.unref();
   return { app, server, store, catalog, conversations, port, ready, close: async () => {
     clearInterval(cleanup);
-    for (const c of conversations.values()) { c.close(); c.client.terminate(); }
+    const open = [...conversations.values()];
+    for (const c of open) c.end("Server sa reštartuje, pripájam znova…", "server_restart");
+    // A short grace lets the restart message reach the phones before the sockets are cut.
+    if (open.length) await new Promise(resolve => setTimeout(resolve, 300));
+    for (const c of open) c.client.terminate();
     for (const p of previews.values()) p.abort.abort();
     await new Promise(resolve => server.close(resolve)); await ready.catch(() => {}); store.close();
   } };
@@ -399,7 +468,12 @@ if (require.main === module) {
     void runtime.ready.then(() => runtime.server.listen(runtime.port, "0.0.0.0", () => console.log("Translator " + APP_VERSION + " listening on " + runtime.port))).catch(async err => {
       console.error("Startup failed: " + err.message); await runtime.close(); process.exitCode = 1;
     });
-    for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => { void runtime.close().then(() => process.exit(0)); });
+    // Since Node 15 an unhandled rejection stops the process; log it and keep the other conversations alive.
+    process.on("unhandledRejection", reason => logEvent(process.env, "unhandled_rejection", { error: String(reason?.message || reason).slice(0, 300) }));
+    for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => {
+      setTimeout(() => process.exit(0), 20000).unref();
+      void runtime.close().catch(err => logEvent(process.env, "shutdown_error", { error: String(err?.message || err).slice(0, 200) })).finally(() => process.exit(0));
+    });
   } catch (err) { console.error("Startup failed: " + err.message); process.exitCode = 1; }
 }
 module.exports = { createApplication };

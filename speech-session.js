@@ -11,6 +11,12 @@ const TTS_PAUSE_MS = 2000;
 const CLIENT_BUFFER_BYTES = 256 * 1024, OUTBOX_MAX_BYTES = 6 * 1024 * 1024;
 // Microphone frames captured just before playback ended still carry the loudspeaker's tail.
 const ECHO_GUARD_MS = 250;
+// Listening can run for hours of dense speech; only the recent part of the transcript is kept on the server.
+const LISTEN_KEEP_ITEMS = 400, LISTEN_KEEP_CHARS = 30000;
+// A session may open several streams per spoken utterance (pauses, fallback); this bounds runaway retries only.
+const STREAMS_PER_ITEM_BUDGET = 4;
+// Microphone bytes are reserved in batches: a database transaction per 64 ms frame blocked the event loop.
+const AUDIO_RESERVE_BATCH = 64 * 1024;
 const { createConversationTimelineState, appendConversationToken, clearConversationNonFinalText, markConversationEndpoint, serializeConversationItems, chunkTextForTts } = require("./server-utils");
 
 class SpeechSession {
@@ -26,7 +32,7 @@ class SpeechSession {
     this.profileId = "conversation"; this.conversationMode = "auto"; this.pttActive = false; this.lastFinalizeAt = 0;
     this.acceptAudio = false; this.finishing = false; this.sttFinished = false;
     this.lastActivity = Date.now(); this.startedAt = Date.now(); this.candidate = null;
-    this.sessionAudio = 0; this.sessionTtsBytes = 0; this.sessionTtsRequests = 0;
+    this.sessionAudio = 0; this.sessionTtsBytes = 0; this.sessionTtsRequests = 0; this.spokenItems = new Set(); this.voiceLimitNotified = false; this.audioUnreserved = 0; this.utterance = 0;
     this.sessionTtsChars = 0; this.sessionSttSeconds = 0; this.endCode = "client_closed";
     this.ttsFailures = 0; this.restUntil = 0; this.audioStates = new Map(); this.endpointTimes = new Map();
     this.timings = []; this.timerSet = new Set(); this.isAlive = true; this.frameCount = 0;
@@ -42,7 +48,9 @@ class SpeechSession {
     this.tick = setInterval(() => this.guard(() => {
       this.frameCount = 0;
       if (this.closed) return;
+      this.releaseStaleHeld();
       if (!this.finishing && Date.now() - this.lastActivity > this.idleMs() && !this.playback) { this.stop("idle"); return; }
+      if (!this.reserveAudio()) { this.stop(); return; }
       if (this.stt?.readyState === WebSocket.OPEN && !this.sttFinished) {
         if (!this.reserve({ sttSeconds: 10 })) return;
         if (this.needsKeepalive()) this.stt.send(JSON.stringify({ type: "keepalive" }));
@@ -80,11 +88,46 @@ class SpeechSession {
       return true;
     } }
     catch { this.end("Účtovanie spotreby nie je dostupné.", "usage_unavailable"); return false; }
-    this.end("Denný limit bol vyčerpaný.", "quota_exceeded"); return false;
+    const reason = this.store.lastRefusal;
+    this.end(reason === "month" ? "Mesačný limit rozpoznávania tohto účtu je vyčerpaný. Obnoví sa 1. dňa ďalšieho mesiaca (UTC); zvýšiť ho môže admin."
+      : reason === "household" ? "Denný limit celej domácnosti je vyčerpaný. Obnoví sa o polnoci UTC."
+      : "Denný limit tohto účtu je vyčerpaný. Obnoví sa o polnoci UTC.", "quota_exceeded"); return false;
+  }
+  // Moves the not yet reserved microphone bytes into the daily quota; false when the quota is exhausted.
+  reserveAudio() {
+    const bytes = this.audioUnreserved; if (!bytes) return true;
+    if (!this.reserve({ audioBytes: bytes })) return false;
+    this.audioUnreserved = 0; return true;
   }
   idleMs() { return this.mode === "listen" ? this.limits.listenIdleMs ?? 300000 : this.limits.idleMs; }
   fullDuplex() { return this.mode === "listen" || this.outputMode === "headphones"; }
-  muted() { return !this.fullDuplex() && Boolean(this.playback?.audioStarted || this.localPlayback); }
+  muted() { return !this.fullDuplex() && Boolean((this.playback?.audioStarted && !this.playback.held) || this.localPlayback); }
+  // Until the phone confirms that the voice plays (a suspended iPhone audio may wait for a tap), it gets a longer grace.
+  armPlaybackTimer(op) {
+    clearTimeout(op.timer);
+    op.timer = this.later(() => this.playbackDone({ playback_id: op.id, status: "interrupted" }), Math.ceil(op.bytes / 48000 * 1000) + (op.audibleAt ? 15000 : 60000));
+  }
+  // A prepared voice whose sentence never got an endpoint is played once nothing new was recognized for 15 s,
+  // instead of blocking the queue. While the speaker keeps talking it stays held: playing it would mute the
+  // speaker microphone in the middle of a long sentence.
+  releaseStaleHeld(now = Date.now()) {
+    const op = this.playback;
+    if (!op || now - Math.max(op.started, this.lastActivity) <= 15000) return;
+    if (op.held) this.releaseHeld();
+    // The text is as complete as it will get; a REST fallback waits for exactly that before it starts.
+    if (!op.job.ended) this.flushPending();
+  }
+  // Releases audio prepared before the end of the sentence: the start message, the buffered chunks, then live streaming.
+  releaseHeld() {
+    const op = this.playback;
+    if (!op?.held) return;
+    op.held = false;
+    if (op.startMessage) this.send({ ...op.startMessage, text: op.job.text });
+    try { for (const buffer of op.heldAudio.splice(0)) this.sendAudio(op, buffer); }
+    catch { this.cancelAudio(); return; }
+    if (op.bytes) { op.audioStarted = true; this.finalizeBeforeMute(); }
+    op.release?.(); this.state();
+  }
   guardEcho() { if (!this.fullDuplex()) this.echoUntil = Date.now() + ECHO_GUARD_MS; }
   sendAudio(op, buffer) {
     if (this.outboxBytes + buffer.length > OUTBOX_MAX_BYTES) throw Object.assign(new Error("slow client"), { errorCode: "client_unavailable" });
@@ -107,7 +150,9 @@ class SpeechSession {
   // Soniox closes the stream after 20 s without audio or keepalive; PTT drops audio while released.
   needsKeepalive() { return !this.acceptAudio || this.muted() || (this.conversationMode === "ptt" && !this.pttActive); }
   state() {
-    this.send({ type: "state", state: this.finishing ? "finishing" : this.candidate ? "confirm_language" : this.playback || this.localPlayback ? "speaking" : this.acceptAudio && this.pending.size ? "translating" : this.acceptAudio ? "listening" : "connecting", microphone_muted: this.muted(), accept_audio: this.acceptAudio });
+    // A voice prepared in advance (held) is not speaking yet: the microphone stays open and the UI shows translating.
+    const speaking = (this.playback && !this.playback.held) || this.localPlayback;
+    this.send({ type: "state", state: this.finishing ? "finishing" : this.candidate ? "confirm_language" : speaking ? "speaking" : this.acceptAudio && this.pending.size ? "translating" : this.acceptAudio ? "listening" : "connecting", microphone_muted: this.muted(), accept_audio: this.acceptAudio });
   }
   snapshot() {
     const latency = {};
@@ -145,6 +190,8 @@ class SpeechSession {
     if (!msg) { this.end("Neplatná správa.", "invalid_message"); return; }
     if (msg.type === "config") {
       if (this.configured || !this.validSettings(msg)) { this.end("Neplatná konfigurácia."); return; }
+      // An open page with an older app.js would mix protocol versions; the new client reloads on this code.
+      if (msg.client_version !== undefined && this.appVersion && msg.client_version !== this.appVersion) { this.end("Je dostupná nová verzia appky. Zatvor ju a otvor znova.", "client_outdated"); return; }
       this.configured = true; clearTimeout(this.configTimer);
       this.languageA = msg.language_a || "sk"; this.languageB = msg.language_b || "de";
       this.mode = msg.mode || "conversation"; this.listenSource = msg.listen_source || "auto";
@@ -157,7 +204,11 @@ class SpeechSession {
       this.startStt(); return;
     }
     if (!this.configured) { this.end("Najprv odošli konfiguráciu."); return; }
-    if (msg.type === "playback_started") { if (this.playback?.id === msg.playback_id && !this.playback.audibleAt) this.playback.audibleAt = Date.now(); return; }
+    if (msg.type === "playback_started") {
+      const op = this.playback;
+      if (op?.id === msg.playback_id && !op.audibleAt) { op.audibleAt = Date.now(); if (op.synthesisDone) this.armPlaybackTimer(op); }
+      return;
+    }
     if (msg.type === "playback_done") { this.playbackDone(msg); return; }
     if (msg.type === "stop_audio") { this.cancelAudio(msg.request_id); this.maybeFinish(); return; }
     if (msg.type === "client_stop") { this.stop(); return; }
@@ -166,10 +217,17 @@ class SpeechSession {
     }
     if (msg.type === "ptt_end" && this.conversationMode === "ptt" && this.pttActive && !this.finishing) {
       this.pttActive = false; this.state();
-      if (this.stt?.readyState === WebSocket.OPEN && Date.now() - this.lastFinalizeAt > 500) {
-        // The client has already sent roughly 200 ms of silence before releasing.
+      // The client has already sent roughly 200 ms of silence before releasing.
+      // Soniox asks not to finalize too often; a quick second release is finalized a moment later instead of never.
+      // One timer at most, and the interval is checked again when it fires.
+      const finalize = () => {
+        this.finalizeTimer = null;
+        if (this.stt?.readyState !== WebSocket.OPEN || this.pttActive || this.finishing) return;
+        const wait = 500 - (Date.now() - this.lastFinalizeAt);
+        if (wait > 0) { this.finalizeTimer = this.later(finalize, wait); return; }
         this.lastFinalizeAt = Date.now(); this.stt.send(JSON.stringify({ type: "finalize" }));
-      }
+      };
+      if (!this.finalizeTimer) finalize();
       return;
     }
     if (msg.type === "local_playback_end") {
@@ -177,7 +235,7 @@ class SpeechSession {
     }
     if (this.finishing) return;
     if (msg.type === "local_playback_start") {
-      if (this.playback || this.localPlayback || !msg.playback_id) { this.send({ type: "error", code: "busy", message: "Počkaj na koniec hlasu." }); return; }
+      if (this.playback || this.localPlayback || this.preparingJob || !msg.playback_id) { this.send({ type: "error", code: "busy", message: "Počkaj na koniec hlasu." }); return; }
       this.localPlayback = msg.playback_id; this.state();
       this.send({ type: "local_playback_ready", playback_id: msg.playback_id });
       this.localTimer = this.later(() => { this.localPlayback = null; this.state(); this.pump(); }, 120000); return;
@@ -204,7 +262,8 @@ class SpeechSession {
     }
     if (msg.type === "replay_translation") {
       const item = this.timeline.items.find(i => i.id === msg.item_id);
-      if (!item?.is_final || !item.translated_text.trim()) return;
+      if (!item) { this.send({ type: "error", code: "replay_unavailable", message: "Túto vetu už nemožno prehrať počas počúvania. Zastav počúvanie a prehraj ju znova." }); return; }
+      if (!item.is_final || !item.translated_text.trim()) return;
       this.suppressed.delete(item.id); this.audioStates.delete(item.id);
       this.enqueue(item.translated_text, item.target_language, item.id); return;
     }
@@ -214,8 +273,8 @@ class SpeechSession {
     if (!data.length || data.length % 2 || data.length > 16384) { this.end("Neplatný audio rámec."); return; }
     if (this.stt?.readyState !== WebSocket.OPEN) return;
     if (this.stt.bufferedAmount > 256 * 1024) { this.end("Spojenie nestíha prenášať zvuk. Obnov rozhovor.", "audio_overload"); return; }
-    this.sessionAudio += data.length;
-    if (this.sessionAudio > this.limits.sessionAudioBytes || !this.reserve({ audioBytes: data.length })) { if (!this.closed) this.stop(); return; }
+    this.sessionAudio += data.length; this.audioUnreserved += data.length;
+    if (this.sessionAudio > this.limits.sessionAudioBytes || (this.audioUnreserved >= AUDIO_RESERVE_BATCH && !this.reserveAudio())) { if (!this.closed) this.stop(); return; }
     this.stt.send(data, { binary: true });
   }
   startStt() {
@@ -229,7 +288,8 @@ class SpeechSession {
     socket.on("open", () => this.guard(() => {
       if (!current()) { socket.close(); return; } clearTimeout(timer);
       const listen = this.mode === "listen", auto = listen || this.languageB === "auto";
-      const hints = listen ? (this.listenSource === "auto" ? [] : [this.listenSource]) : auto ? [] : [this.languageA, this.languageB];
+      // "Recognize language" still hints the own language, which keeps Slovak from being taken for Czech.
+      const hints = listen ? (this.listenSource === "auto" ? [] : [this.listenSource]) : auto ? [this.languageA] : [this.languageA, this.languageB];
       socket.send(JSON.stringify({
         model: STT_MODEL, audio_format: "pcm_s16le", sample_rate: 16000, num_channels: 1, client_reference_id: this.auth.username,
         ...(hints.length ? { language_hints: hints } : {}),
@@ -251,17 +311,34 @@ class SpeechSession {
       this.tokens(result.tokens || []);
       if (result.finished) { this.sttFinished = true; this.acceptAudio = false; this.flushPending(); socket.close(); this.maybeFinish(); }
     }));
-    socket.on("error", () => { if (current()) this.end("Spojenie s rozpoznávaním zlyhalo.", "stt_connection"); });
+    // A refused handshake (bad key, no credit, overload) arrives as an HTTP status, not as a stream error.
+    socket.on("unexpected-response", (request, response) => {
+      response.resume(); request.destroy();
+      if (current()) this.providerError({ error_code: response.statusCode, error_type: "handshake" });
+    });
+    socket.on("error", () => { if (current()) this.recoverStt("Spojenie s rozpoznávaním zlyhalo.", "stt_connection"); });
     socket.on("close", () => {
       clearTimeout(timer);
       if (!current()) return;
       this.stt = null; this.acceptAudio = false;
       if (this.finishing || this.sttFinished) { this.sttFinished = true; this.flushPending(); this.maybeFinish(); }
-      else this.end("Spojenie sa prerušilo. Posledná výpoveď nemusí byť úplná.", "stt_connection");
+      else this.recoverStt("Spojenie sa prerušilo. Posledná výpoveď nemusí byť úplná.", "stt_connection");
     });
+  }
+  // Listening mode keeps running, so the oldest items are dropped instead of ending the session.
+  trimListenTimeline() {
+    const t = this.timeline, size = i => i.source_text.length + i.translated_text.length;
+    let total = t.items.reduce((n, i) => n + size(i), 0);
+    while (t.items.length > 1 && (t.items.length > LISTEN_KEEP_ITEMS || total > LISTEN_KEEP_CHARS)) {
+      const removed = t.items.shift(); total -= size(removed);
+      if (removed.id === t.currentItemId) t.currentItemId = null;
+      for (const map of [this.sentItems, this.audioStates, this.endpointTimes]) map.delete(removed.id);
+      for (const set of [this.prewarmed, this.suppressed]) set.delete(removed.id);
+    }
   }
   tokens(tokens) {
     if (!Array.isArray(tokens)) return;
+    if (this.mode === "listen") this.trimListenTimeline();
     clearConversationNonFinalText(this.timeline);
     for (const token of tokens) {
       if (this.timeline.items.length >= 990) { this.send({ type: "error", code: "transcript_overload", message: "Rozhovor je plný. Ulož ho a začni nový; posledná časť sa nemusela zachovať." }); this.stop("error"); break; }
@@ -269,6 +346,8 @@ class SpeechSession {
       if (token.text === "<end>" || token.text === "<fin>") {
         const item = markConversationEndpoint(this.timeline);
         if (item) this.endpointTimes.set(item.id, Date.now());
+        // The speaker stopped: a prepared voice may play, also when a language switch gave the endpoint to another item.
+        this.utterance++; this.releaseHeld();
         this.flushPending();
         if (this.mode !== "listen" && this.languageB === "auto" && item?.source_language && item.source_language !== this.languageA && this.catalog.hasLanguage(item.source_language)) {
           this.candidate = item.source_language; this.acceptAudio = false;
@@ -286,9 +365,13 @@ class SpeechSession {
         const id = result.item.id;
         // A Soniox TTS stream belongs to one utterance and one translation direction.
         for (const [otherId] of this.pending) if (otherId !== id) this.flushOne(otherId);
+        // A prepared voice still waits for the endpoint here: another item is no proof that the speaker stopped
+        // (a foreign word mid-sentence opens one), and playing now would mute the microphone on the rest of the sentence.
         this.appendTtsPart(id, result.tts_language, result.tts_text);
       }
     }
+    if (this.mode === "listen") this.trimListenTimeline();
+    // In listening mode only a single oversized utterance without an endpoint can still exceed the cap.
     if (this.timeline.items.reduce((n, i) => n + i.source_text.length + i.translated_text.length, 0) > 40000 || this.timeline.items.length >= 990) {
       this.send({ type: "error", message: "Rozhovor je dlhý. Ulož ho a začni nový." }); this.stop("error");
     }
@@ -298,9 +381,35 @@ class SpeechSession {
   providerError(result) {
     const status = Number(result.error_code);
     this.lastProviderError = { status: Number.isFinite(status) ? status : null, type: String(result.error_type || "").slice(0, 80), request_id: String(result.request_id || "").slice(0, 120), at: new Date().toISOString() };
-    if ([408, 429, 500, 502, 503].includes(status)) { this.end("Rozpoznávanie je dočasne nedostupné. Obnovujem…", "stt_retry"); return; }
+    if ([408, 429, 500, 502, 503].includes(status)) { this.recoverStt("Rozpoznávanie je dočasne nedostupné. Obnovujem…", "stt_retry"); return; }
     if (status === 402) { this.end("Kredit Soniox je vyčerpaný.", "provider_credit"); return; }
     this.end("Rozpoznávanie nie je dostupné.", "stt_provider_error");
+  }
+  // Reopens only the Soniox stream: the transcript, the voice queue and the voice playing now all continue.
+  // Two recoveries per minute at most; after that the client's own reconnect takes over.
+  recoverStt(message, code) {
+    if (this.closed || this.finishing) return;
+    const now = Date.now();
+    this.sttRecoveries = (this.sttRecoveries || []).filter(at => now - at < 60000);
+    if (this.sttRecoveries.length >= 2) { this.end(message, code); return; }
+    this.sttRecoveries.push(now);
+    const old = this.stt; this.generation++; this.stt = null; this.acceptAudio = false;
+    try { old?.terminate(); } catch { /* already gone */ }
+    // The interrupted sentence keeps what was final and is translated and spoken as it is.
+    const item = markConversationEndpoint(this.timeline);
+    if (item) this.endpointTimes.set(item.id, Date.now());
+    this.utterance++; this.releaseHeld(); this.flushPending(); this.updateItems(); this.state();
+    // Only if nothing else (a confirmed language) opened a new stream meanwhile: a second one would stay open unused.
+    const generation = this.generation;
+    this.later(() => { if (this.generation === generation && !this.stt) this.startStt(); }, 300);
+  }
+  // Speaker mode mutes the microphone while the voice plays. Anything the other person already said is finalized now,
+  // so it is translated instead of being glued to what they say after the voice.
+  finalizeBeforeMute() {
+    if (this.fullDuplex() || this.stt?.readyState !== WebSocket.OPEN || Date.now() - this.lastFinalizeAt < 500) return;
+    const current = this.timeline.items.find(i => i.id === this.timeline.currentItemId);
+    if (!current || current.is_final || !(current.non_final_source_text || current.final_source_text || "").trim()) return;
+    this.lastFinalizeAt = Date.now(); this.stt.send(JSON.stringify({ type: "finalize" }));
   }
   prewarmFor(item, language) {
     // Full-duplex playback starts before <end> and benefits from a prewarm.
@@ -317,7 +426,7 @@ class SpeechSession {
     }
     let job = this.pending.get(itemId);
     if (!job) {
-      job = { text: "", parts: [], waiters: new Set(), ended: false, queued: false, language, itemId, voice: language === this.languageA ? this.voiceA : this.voiceB, speed: this.ttsSpeed };
+      job = { text: "", parts: [], waiters: new Set(), ended: false, queued: false, utterance: this.utterance, language, itemId, voice: language === this.languageA ? this.voiceA : this.voiceB, speed: this.ttsSpeed };
       this.pending.set(itemId, job);
     }
     if (job.text.length + text.length > 5000) {
@@ -326,7 +435,9 @@ class SpeechSession {
       this.send({ type: "error", code: "voice_overload", message: "Výpoveď je pre hlas príliš dlhá. Preklad zostáva v texte." }); return;
     }
     job.text += text; job.parts.push(text); this.notifyJob(job);
-    if (this.fullDuplex()) this.queueJob(job);
+    // Speaker mode also starts synthesis right away; pump() holds the audio until the sentence ends,
+    // so the voice can start immediately after the endpoint instead of after a fresh TTS request.
+    this.queueJob(job);
   }
   queueJob(job) {
     if (job.queued || this.closed || !this.ttsEnabled) return;
@@ -356,7 +467,8 @@ class SpeechSession {
       this.updateItems(); return;
     }
     for (const chunk of chunks) {
-      const job = { text: chunk, parts: [chunk], waiters: new Set(), ended: true, queued: false, language, itemId, voice: language === this.languageA ? this.voiceA : this.voiceB, speed: this.ttsSpeed };
+      // replay: complete text of an earlier sentence, never held back.
+      const job = { text: chunk, parts: [chunk], waiters: new Set(), ended: true, queued: false, replay: true, language, itemId, voice: language === this.languageA ? this.voiceA : this.voiceB, speed: this.ttsSpeed };
       this.queueJob(job);
     }
   }
@@ -405,40 +517,60 @@ class SpeechSession {
     const job = this.queue.shift(); if (!job) { this.state(); this.maybeFinish(); return; }
     this.preparingJob = job;
     const audioGeneration = this.audioGeneration;
-    await this.catalog.ensureVoices();
+    await this.catalog.ensureVoices(job.voice);
     this.preparingJob = null;
     // Audio cancelled while the catalog refreshed: newer jobs may have queued behind this one.
     if (this.closed || audioGeneration !== this.audioGeneration || !this.ttsEnabled) { this.maybeFinish(); this.pump(); return; }
+    // A local replay may have started while the catalog refreshed; this job waits for its end (local_playback_end pumps).
+    if (this.localPlayback) { this.queue.unshift(job); this.state(); return; }
     if (!this.catalog.hasVoiceFor(this.auth.username, job.voice)) {
       this.audioStates.set(job.itemId, "not_spoken"); this.suppressed.add(job.itemId);
       job.ended = true; this.notifyJob(job); this.pending.delete(job.itemId);
       this.send({ type: "error", code: "voice_unavailable", message: "Vybraný hlas už nie je dostupný pre tento účet." });
       this.updateItems(); this.pump(); return;
     }
-    if (this.sessionTtsRequests >= this.limits.sessionTtsRequests) { this.audioStates.set(job.itemId, "not_spoken"); this.send({ type: "error", message: "Limit hlasu konverzácie bol vyčerpaný." }); this.cancelAudio(); this.maybeFinish(); return; }
+    // The cap counts spoken utterances, not streams: pauses and fallbacks split one utterance into several streams.
+    if (!this.spokenItems.has(job.itemId) && this.spokenItems.size >= this.limits.sessionTtsRequests) {
+      this.audioStates.set(job.itemId, "not_spoken"); this.suppressed.add(job.itemId);
+      job.ended = true; this.notifyJob(job); this.pending.delete(job.itemId);
+      // One message per session; later utterances stay in text without another error.
+      if (!this.voiceLimitNotified) { this.voiceLimitNotified = true; this.send({ type: "error", code: "voice_limit", message: "Limit hlasu v tomto rozhovore bol vyčerpaný. Preklad pokračuje v texte; začni nový rozhovor." }); }
+      this.updateItems(); this.pump(); return;
+    }
+    this.spokenItems.add(job.itemId);
     const op = { id: randomUUID(), job, abort: new AbortController(), started: Date.now(), audioStarted: false, bytes: 0, synthesisDone: false };
+    // Speaker mode: the sentence is still being spoken, so its voice is prepared but held back.
+    // An endpoint since its first words means the speaker has stopped, whichever item got that endpoint: a foreign word
+    // splits a sentence into several items and only the last one is marked. Being the last item is not the test,
+    // because a word briefly taken for the other language opens an empty item behind a sentence that still goes on.
+    const item = this.timeline.items.find(i => i.id === job.itemId);
+    op.held = !job.replay && !this.fullDuplex() && !this.finishing && job.utterance === this.utterance && !item?.is_final && !this.endpointTimes.has(job.itemId);
+    op.heldAudio = [];
+    op.released = op.held ? new Promise(resolve => { op.release = resolve; }) : null;
     this.playback = op; this.state();
     const current = () => !this.closed && this.playback === op && !op.abort.signal.aborted;
     const reserveAttempt = chars => {
-      if (this.sessionTtsRequests >= this.limits.sessionTtsRequests) return false;
+      if (this.sessionTtsRequests >= this.limits.sessionTtsRequests * STREAMS_PER_ITEM_BUDGET) return false;
       if (!this.reserve({ ttsRequests: 1, ttsChars: chars })) return false;
       this.sessionTtsRequests++; return true;
     };
     const begin = transport => {
       op.transport = transport;
-      this.send({ type: "tts_stream_start", playback_id: op.id, utterance_id: job.itemId, format: "pcm_s16le", sample_rate: 24000, model: TTS_MODEL, voice: job.voice, language: job.language, transport, text: job.text });
+      const start = { type: "tts_stream_start", playback_id: op.id, utterance_id: job.itemId, format: "pcm_s16le", sample_rate: 24000, model: TTS_MODEL, voice: job.voice, speed: job.speed, language: job.language, transport, text: job.text };
+      if (op.held) op.startMessage = start; else this.send(start);
     };
     const audio = buffer => {
       if (!current()) return;
       if (this.client.readyState !== WebSocket.OPEN) throw Object.assign(new Error("client closed"), { errorCode: "client_unavailable" });
       if (this.sessionTtsBytes + buffer.length > this.limits.sessionTtsBytes || !this.reserve({ ttsAudioBytes: buffer.length })) throw Object.assign(new Error("audio quota"), { errorCode: "quota_exceeded" });
       this.sessionTtsBytes += buffer.length; op.bytes += buffer.length;
+      if (op.firstAudioMs === undefined) op.firstAudioMs = Date.now() - op.started;
+      if (op.held) { op.heldAudio.push(buffer); return; }
       this.sendAudio(op, buffer);
       if (!op.audioStarted) {
         op.audioStarted = true;
-        op.firstAudioMs = Date.now() - op.started;
         // The speaker microphone is muted from the first audible sample, not while waiting for it.
-        this.state();
+        this.finalizeBeforeMute(); this.state();
       }
     };
     try {
@@ -452,7 +584,10 @@ class SpeechSession {
           if (!current()) return;
           job.streamingFailed = true; this.notifyJob(job);
           if (isTransportFailure(err)) { if (++this.ttsFailures >= 2) this.restUntil = Date.now() + 60000; }
-          if (this.transport !== "auto" || op.audioStarted || err.audioStarted || !isTransportFailure(err)) throw err;
+          // Audio that is still held back never reached the phone, so the whole sentence can start again over REST.
+          const heard = op.audioStarted || (err.audioStarted && !op.held);
+          if (this.transport !== "auto" || heard || !isTransportFailure(err)) throw err;
+          op.heldAudio = []; op.bytes = 0; op.firstAudioMs = undefined; op.startMessage = null;
           useRest = true;
           this.send({ type: "tts_fallback", playback_id: op.id });
         }
@@ -460,18 +595,26 @@ class SpeechSession {
       if (useRest) {
         await this.waitForJob(job, op.abort.signal);
         if (!current()) return;
+        // This text is sent as it is; words recognized from now on start a new job instead of being lost.
+        if (this.pending.get(job.itemId) === job) this.pending.delete(job.itemId);
+        // REST receives the whole text again and may bill it again, so it is reserved in full.
         if (!reserveAttempt([...job.text].length)) throw new Error("quota");
         begin("rest");
         await synthesizeRest({ url: this.urls.ttsRest, apiKey: this.apiKey, clientReferenceId: this.auth.username, ...job, signal: op.abort.signal, onChunk: chunk => {
           for (let i = 0; i < chunk.length; i += 16384) audio(chunk.subarray(i, i + 16384));
         } });
       }
+      // A voice prepared in advance waits for the end of its sentence (or a stop) before it is played.
+      if (op.held) {
+        await Promise.race([op.released, new Promise(resolve => op.abort.signal.addEventListener("abort", resolve, { once: true }))]);
+        if (!current()) return;
+      }
       // The end marker must follow the last audio chunk still waiting for a slow phone.
       await this.drainAudio();
       if (!current()) return;
       op.synthesisDone = true;
       this.send({ type: "tts_stream_end", playback_id: op.id, text: job.text });
-      op.timer = this.later(() => this.playbackDone({ playback_id: op.id, status: "interrupted" }), Math.ceil(op.bytes / 48000 * 1000) + 15000);
+      this.armPlaybackTimer(op);
     } catch {
       if (!current()) return;
       await this.drainAudio();
@@ -483,7 +626,7 @@ class SpeechSession {
       this.send({ type: "tts_stream_end", playback_id: op.id, interrupted: true });
       this.send({ type: "error", code: "voice_failed", message: "Hlas sa nepodarilo dokončiť. Preklad zostáva v texte." });
       if (!op.audioStarted) { this.playback = null; this.updateItems(); this.state(); this.pump(); }
-      else op.timer = this.later(() => this.playbackDone({ playback_id: op.id, status: "interrupted" }), Math.ceil(op.bytes / 48000 * 1000) + 15000);
+      else this.armPlaybackTimer(op);
     }
   }
   playbackDone(msg) {
@@ -500,7 +643,7 @@ class SpeechSession {
   stop(reason = "client_stop") {
     if (this.finishing || this.closed) return;
     this.finishReason = reason;
-    this.finishing = true; this.acceptAudio = false; this.state();
+    this.finishing = true; this.acceptAudio = false; this.releaseHeld(); this.state();
     if (this.stt?.readyState === WebSocket.OPEN) this.stt.send("");
     else { this.sttFinished = true; this.flushPending(); this.maybeFinish(); }
     this.later(() => {
@@ -526,6 +669,8 @@ class SpeechSession {
   close() {
     if (this.closed) return;
     this.closed = true; this.generation++; this.audioGeneration++; this.acceptAudio = false;
+    // Audio already sent to Soniox is recorded even when the limit was reached meanwhile.
+    if (this.audioUnreserved) { try { this.store.record?.(this.auth.username, { audioBytes: this.audioUnreserved }); } catch { /* Accounting must not block cleanup. */ } this.audioUnreserved = 0; }
     clearInterval(this.tick); clearInterval(this.heartbeat);
     for (const t of this.timerSet) clearTimeout(t);
     this.playback?.abort.abort(); clearTimeout(this.playback?.timer);

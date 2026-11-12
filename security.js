@@ -29,7 +29,7 @@ function parseMessage(data) {
   try { msg = JSON.parse(String(data)); } catch { return null; }
   if (!msg || Array.isArray(msg) || typeof msg !== "object" || typeof msg.type !== "string") return null;
   const fields = {
-    config: ["mode", "listen_source", "language_a", "language_b", "tts_voice", "voice_a", "voice_b", "output_mode", "profile_id", "conversation_mode", "tts_speed"],
+    config: ["mode", "listen_source", "language_a", "language_b", "tts_voice", "voice_a", "voice_b", "output_mode", "profile_id", "conversation_mode", "tts_speed", "client_version"],
     update_settings: ["voice_a", "voice_b", "output_mode", "tts_speed"],
     confirm_language: ["language"], playback_started: ["playback_id"], playback_done: ["playback_id", "status"],
     local_playback_start: ["playback_id"], local_playback_end: ["playback_id"],
@@ -61,6 +61,11 @@ class WindowLimiter {
     }
     return ++entry.count <= this.max;
   }
+  // blocked/hit let a limiter count only failures (a correct login never uses up the budget).
+  blocked(key, now = Date.now()) { this.prune(now); return (this.entries.get(key)?.count || 0) >= this.max; }
+  hit(key, now = Date.now()) { this.allow(key, now); }
+  // Gives back an attempt counted in advance (it turned out to be a success).
+  release(key) { const entry = this.entries.get(key); if (entry && entry.count > 0) entry.count--; }
   prune(now = Date.now()) { for (const [key, e] of this.entries) if (e.expires <= now) this.entries.delete(key); }
 }
 module.exports = { parseCookies, equal, validOrigin, clientIp, parseMessage, WindowLimiter };

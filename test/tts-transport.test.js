@@ -240,3 +240,36 @@ test("an expired prewarm is cancelled and never receives synthesis text", async 
   await synthesis;
   client.close();
 });
+test("the end of a streamed sentence gets the full first-audio deadline", async () => {
+  // A pause before the end of the text used most of the deadline; the voice then had only the rest of it to start.
+  const client = createClient({ firstAudioMs: 200 });
+  async function* parts() { yield "Guten Tag"; await new Promise(r => setTimeout(r, 150)); }
+  try {
+    const promise = client.synthesize({ language: "de", parts: parts() });
+    let end;
+    for (let i = 0; i < 100 && !end; i++) { await new Promise(r => setTimeout(r, 5)); end = MockWebSocket.instances[0]?.sent.find(m => m.text_end); }
+    assert.ok(end);
+    // 100 ms after the end of the text is 250 ms after the last part: late for the old deadline, in time for the new one.
+    await new Promise(r => setTimeout(r, 100));
+    const ws = MockWebSocket.instances[0];
+    ws.receive({ stream_id: end.stream_id, audio: Buffer.from([1, 2]).toString("base64"), audio_end: true });
+    ws.receive({ stream_id: end.stream_id, terminated: true });
+    assert.equal((await promise).audioBytes, 2);
+  } finally { client.close(); }
+});
+test("first audio deadline waits while a long sentence is still being streamed in parts", async () => {
+  // Android test: a 15 s Slovak sentence sent its translation in parts; the provider held audio until more text came,
+  // the 3 s first-audio deadline fired mid-sentence and every long sentence fell back to REST.
+  const client = createClient({ firstAudioMs: 40 });
+  async function* parts() { for (let i = 0; i < 6; i++) { yield "slowo" + i + " "; await new Promise(r => setTimeout(r, 25)); } }
+  try {
+    const promise = client.synthesize({ language: "de", parts: parts() });
+    let end;
+    for (let i = 0; i < 100 && !end; i++) { await new Promise(r => setTimeout(r, 5)); end = MockWebSocket.instances[0]?.sent.find(m => m.text_end); }
+    assert.ok(end, "all parts were sent without a timeout");
+    const ws = MockWebSocket.instances[0];
+    ws.receive({ stream_id: end.stream_id, audio: Buffer.from([1, 2]).toString("base64"), audio_end: true });
+    ws.receive({ stream_id: end.stream_id, terminated: true });
+    assert.equal((await promise).audioBytes, 2);
+  } finally { client.close(); }
+});

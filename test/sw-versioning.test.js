@@ -140,23 +140,40 @@ test("navigations use the network then the current cache's canonical HTML, inclu
   let mode = "online";
   const w = worker(async () => {
     if (mode === "offline") throw new Error("offline");
-    return new Response("network shell", { status: mode === "unavailable" ? 503 : 200 });
+    return new Response("network shell ?v=" + version, { status: mode === "unavailable" ? 503 : 200 });
   });
   const old = await w.caches.open("translator-shell-v3-2");
   await old.put("/index.html", new Response("old shell"));
   await w.lifecycle("install");
   const current = await w.caches.open(CACHE);
   await current.put("/index.html", new Response("cached shell"));
-  assert.equal(await (await w.request("/", { mode: "navigate" })).text(), "network shell");
+  assert.equal(await (await w.request("/", { mode: "navigate" })).text(), "network shell ?v=" + version);
   for (const failure of ["offline", "unavailable"]) {
     mode = failure;
     for (const url of ["/", "/index.html", "/?standalone=1", "/index.html?standalone=1"]) {
-      assert.equal(await (await w.request(url, { mode: "navigate" })).text(), "network shell");
+      assert.equal(await (await w.request(url, { mode: "navigate" })).text(), "network shell ?v=" + version);
     }
   }
   mode = "offline";
   w.stores.get(CACHE).delete("https://unit.test/index.html");
   assert.equal((await w.request("/", { mode: "navigate" })).type, "error");
+});
+
+test("the offline HTML is kept only for exactly this version, not for a longer one that starts the same", async () => {
+  // Codex review 2026-11: "?v=3.6.1" is a prefix of "?v=3.6.10", so the HTML of 3.6.10 replaced the offline copy of 3.6.1.
+  let body = "";
+  const w = worker(async () => new Response(body));
+  await w.lifecycle("install");
+  const current = await w.caches.open(CACHE);
+  await current.put("/index.html", new Response("own shell"));
+  for (const newer of [version + "0", version + ".1", version + "-beta"]) {
+    body = '<script src="/app.js?v=' + newer + '"></script>';
+    await w.request("/", { mode: "navigate" });
+    assert.equal(await (await current.match("/index.html")).text(), "own shell", newer + " must not replace the offline copy");
+  }
+  body = '<script src="/app.js?v=' + version + '"></script>';
+  await w.request("/", { mode: "navigate" });
+  assert.equal(await (await current.match("/index.html")).text(), body);
 });
 
 test("private, unknown, cross-origin, non-GET and other-version requests bypass the worker", () => {

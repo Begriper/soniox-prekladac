@@ -6,7 +6,7 @@ Platí pre Claude Code aj Codex. Dopĺňa `D:\Codex\AGENTS.md` (komunikácia po 
 
 - Súkromná mobilná PWA na živý hlasový preklad tvárou v tvár. Stack: Node 24 + Express + ws, vanilla HTML/CSS/JS, bez frameworku a bez build kroku. Ostáva PWA; natívna appka ani React/Next.js sa neplánujú.
 - Server: `server.js`, `speech-session.js` (STT, preklad, TTS fronta), `tts-transport.js`, `tts-rest.js`, `catalog.js`, `security.js`, `usage-store.js`. Klient: `public/`.
-- Soniox: `stt-rt-v5` s natívnym `two_way` prekladom a `tts-rt-v2`. Kľúč posielať iba v hlavičke `Authorization` (od 15. 1. 2027 povinné). API kľúč nikdy do prehliadača.
+- Soniox: `stt-rt-v6` s natívnym `two_way` prekladom a `tts-rt-v2`. Kľúč posielať iba v hlavičke `Authorization` (od 15. 1. 2027 povinné). API kľúč nikdy do prehliadača.
 - `main` = produkcia na Fly (`soniox-prekladac`, jedna Machine, jeden volume). Postup nasadenia a rollbacku je v `deployment.md`.
 - Kontext a rozhodnutia: `README.md`, `analysis/deep-analysis-2026-10-26.md`.
 

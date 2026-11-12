@@ -2,7 +2,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
-const { fixture, until } = require("./helpers/mock-runtime.cjs");
+const { fixture, until, CODE } = require("./helpers/mock-runtime.cjs");
 const { DatabaseSync } = require("node:sqlite");
 const { UsageStore } = require("../usage-store");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
@@ -30,8 +30,23 @@ async function setup(t, env) {
   const f = await fixture({ env: { MAX_LOGIN_ATTEMPTS: "1000", ...env } }); t.after(() => f.close());
   f.owner = await f.login(); f.family = await f.login("family", FAMILY); return f;
 }
+// Registration options require the account password since a session cookie alone must not add a passkey.
+const passwordFor = (f, cookie) => cookie === f.owner ? CODE : FAMILY;
+test("a database failure after the password check answers instead of leaving the request hanging", async t => {
+  // Codex review 2026-11: the async handler only caught errors around the password check; Express 4 ignores
+  // a rejected promise, so a later failure left the phone waiting for its own timeout.
+  const f = await setup(t);
+  const original = f.runtime.store.passkeys;
+  f.runtime.store.passkeys = () => { throw new Error("database is locked"); };
+  try {
+    // A hanging request fails this test after 3 s instead of stalling the whole run.
+    const res = await fetch(f.url + root + "/register/options", { method: "POST", signal: AbortSignal.timeout(3000),
+      headers: { Origin: f.origin, "Content-Type": "application/json", Cookie: f.family }, body: JSON.stringify({ password: FAMILY }) });
+    assert.equal(res.status, 503);
+  } finally { f.runtime.store.passkeys = original; }
+});
 async function registerOptions(f, cookie = f.family) {
-  const res = await f.request(root + "/register/options", {}, cookie); assert.equal(res.status, 200); return res.json();
+  const res = await f.request(root + "/register/options", { password: passwordFor(f, cookie) }, cookie); assert.equal(res.status, 200); return res.json();
 }
 async function register(f, a = authenticator(), cookie = f.family, patch = {}) {
   const options = await registerOptions(f, cookie), body = a.response(options, f.origin, true, patch);
@@ -158,7 +173,7 @@ test("max ten passkeys per user, including already issued registration options; 
   const duplicate = a.response(await registerOptions(f, f.owner), f.origin, true);
   assert.equal((await f.request(root + "/register", duplicate, f.owner)).status, 400);
   for (let i = 1; i < 10; i++) await register(f);
-  assert.equal((await f.request(root + "/register/options", {}, f.family)).status, 400);
+  assert.equal((await f.request(root + "/register/options", { password: FAMILY }, f.family)).status, 400);
   // A different logged-in session can hold options issued before the cap was reached.
   const second = await f.login("family", FAMILY);
   await f.request(root + "/" + a.id + "/delete", {}, f.family);
@@ -208,14 +223,21 @@ test("passkey endpoints require sessions or valid same-origin requests; admin re
   const res = await fetch(f.url + root + "/login/options", { method: "POST", headers: { Origin: "https://evil.example", "Content-Type": "application/json" }, body: "{}" });
   assert.equal(res.status, 403);
 });
-test("login options and assertions share a per-IP rate limit and signed strict cookie", async t => {
+test("assertions have a strict per-IP limit, fetching options does not use it up, and the cookie is signed and strict", async t => {
   const f = await setup(t, { MAX_LOGIN_ATTEMPTS: "3" });
   const first = await f.request(root + "/login/options", {}); assert.equal(first.status, 200);
   assert.match(first.headers.get("set-cookie"), /^sl_webauthn=[\w-]{43}\.[\w-]{43}; Path=\/api\/passkeys\/login; HttpOnly; SameSite=Strict; Max-Age=300/);
-  assert.equal((await f.request(root + "/login", {})).status, 400);
-  assert.equal((await f.request(root + "/login/options", {})).status, 200);
-  assert.equal((await f.request(root + "/login/options", {})).status, 429);
+  // Every login screen fetches options; a household behind one IP must not run out of sign-ins.
+  for (let i = 0; i < 5; i++) assert.equal((await f.request(root + "/login/options", {})).status, 200);
+  for (let i = 0; i < 3; i++) assert.equal((await f.request(root + "/login", {})).status, 400);
   assert.equal((await f.request(root + "/login", {})).status, 429);
+});
+
+test("adding a passkey asks for the account password again", async t => {
+  const f = await setup(t);
+  assert.equal((await f.request(root + "/register/options", {}, f.family)).status, 403);
+  assert.equal((await f.request(root + "/register/options", { password: "wrong-password-123" }, f.family)).status, 403);
+  assert.equal((await f.request(root + "/register/options", { password: FAMILY }, f.family)).status, 200);
 });
 test("safe legacy migration assigns stable random user handles and preserves them on reopen", t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "translator-passkey-test-")), file = path.join(dir, "test.sqlite");

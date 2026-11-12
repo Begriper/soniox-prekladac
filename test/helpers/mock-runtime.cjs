@@ -17,7 +17,7 @@ async function fixture(options = {}) {
     }
     if (req.url === "/stt-models" || req.url === "/tts-models") {
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ models: [{ id: req.url === "/stt-models" ? "stt-rt-v5" : "tts-rt-v2", languages: ["sk", "de", "es", "en", "ar", "zh"], voices: [{ id: "Adrian", gender: "male" }, { id: "Maya", gender: "female" }] }] })); return;
+      res.end(JSON.stringify({ models: [{ id: req.url === "/stt-models" ? "stt-rt-v6" : "tts-rt-v2", languages: ["sk", "de", "es", "en", "ar", "zh"], voices: [{ id: "Adrian", gender: "male" }, { id: "Maya", gender: "female" }] }] })); return;
     }
     if (req.url.startsWith("/shared-voices")) {
       res.setHeader("Content-Type", "application/json");
@@ -31,7 +31,8 @@ async function fixture(options = {}) {
     if (state.restDelay) await new Promise(r => setTimeout(r, state.restDelay));
     if (!res.destroyed) { res.setHeader("Content-Type", "application/octet-stream"); res.end(pcm); }
   });
-  const wss = new WebSocket.Server({ server: provider });
+  // "/payment-required" refuses the handshake like Soniox does for an empty balance.
+  const wss = new WebSocket.Server({ server: provider, verifyClient: (info, done) => info.req.url === "/payment-required" ? done(false, 402) : done(true) });
   const send = (ws, value) => { if (ws.readyState === 1) ws.send(JSON.stringify(value)); };
   function turn(ws, reverse = false) {
     const config = state.configs.find(c => c.ws === ws)?.config;
@@ -74,7 +75,7 @@ async function fixture(options = {}) {
   const runtime = createApplication({
     SONIOX_API_KEY: "mock-provider-key", SESSION_SECRET: "test-session-secret-not-for-production-1234",
     APP_ACCESS_CODES: "owner:" + CODE + ",family:family-test-access-123456", APP_OWNER_USERNAME: "owner", APP_ORIGINS: origin,
-    USAGE_DB_PATH: options.db || ":memory:", PORT: String(options.port || 3000),
+    USAGE_DB_PATH: options.db || ":memory:", LOG_EVENTS: "false", PORT: String(options.port || 3000),
     SONIOX_STT_URL: base.replace("http", "ws") + "/stt",
     SONIOX_TTS_WS_URL: base.replace("http", "ws") + "/tts",
     SONIOX_TTS_REST_URL: base + "/tts", SONIOX_STT_MODELS_URL: base + "/stt-models",
@@ -87,8 +88,8 @@ async function fixture(options = {}) {
   }
   await runtime.ready;
   async function login(username, password) { return (await request("/api/login", username === undefined ? { code: CODE } : { username, password })).headers.get("set-cookie").split(";")[0]; }
-  async function connect(cookie, config = { language_a: "sk", language_b: "de" }) {
-    const ws = new WebSocket(url.replace("http", "ws"), { origin, headers: { Cookie: cookie } });
+  async function connect(cookie, config = { language_a: "sk", language_b: "de" }, path = "") {
+    const ws = new WebSocket(url.replace("http", "ws") + path, { origin, headers: { Cookie: cookie } });
     ws.messages = []; ws.audio = [];
     ws.on("error", () => {});
     ws.on("message", (data, binary) => { binary ? ws.audio.push(data) : ws.messages.push(JSON.parse(data)); });

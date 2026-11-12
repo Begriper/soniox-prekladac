@@ -9,15 +9,21 @@ function decode(value, max = 4096) {
   if (bytes.toString("base64url") !== value) throw new Error("Invalid encoding");
   return bytes;
 }
-function installPasskeyApi(app, { store, requireSession, finishLogin, origins, secret, production, env }) {
+function installPasskeyApi(app, { store, requireSession, finishLogin, origins, secret, production, env, confirmPassword, logEvent = () => {}, tag = String }) {
   const rpId = new URL([...origins][0]).hostname, rpHash = sha256(rpId);
   const challenges = new Map();
+  // Fetching a challenge is cheap and happens on every login screen; only the actual sign-in uses the stricter budget.
   const rate = new WindowLimiter(Number(env.MAX_LOGIN_ATTEMPTS || 8), 600000), globalRate = new WindowLimiter(100, 600000, 1);
+  const optionsRate = new WindowLimiter(60, 600000), confirmRate = new WindowLimiter(5, 600000);
   const sign = id => crypto.createHmac("sha256", secret).update("webauthn:" + id).digest("base64url");
   const cookie = (value, age) => COOKIE + "=" + value + "; Path=/api/passkeys/login; HttpOnly; SameSite=Strict; Max-Age=" + age + (production ? "; Secure" : "");
   const invalid = res => res.status(400).json({ error: "Overenie zlyhalo. Skús znova alebo použi meno a heslo." });
   function limited(req, res, next) {
     if (!rate.allow(clientIp(req, env.TRUST_FLY_PROXY === "true" && Boolean(env.FLY_APP_NAME))) || !globalRate.allow("all")) return res.status(429).json({ error: "Príliš veľa pokusov. Skús neskôr." });
+    next();
+  }
+  function optionsLimited(req, res, next) {
+    if (!optionsRate.allow(clientIp(req, env.TRUST_FLY_PROXY === "true" && Boolean(env.FLY_APP_NAME)))) return res.status(429).json({ error: "Príliš veľa pokusov. Skús neskôr." });
     next();
   }
   function issue(key) {
@@ -53,13 +59,25 @@ function installPasskeyApi(app, { store, requireSession, finishLogin, origins, s
     try { fn(); store.db.exec("COMMIT"); }
     catch (err) { store.db.exec("ROLLBACK"); throw err; }
   }
-  app.post("/api/passkeys/register/options", requireSession, (req, res) => {
-    if (store.passkeys(req.auth.username).length >= 10) return res.status(400).json({ error: "Účet má najviac 10 prístupových kľúčov. Najprv niektorý odstráň." });
-    const challenge = issue("register:" + req.auth.id), user = store.getUser(req.auth.username);
-    res.json({ challenge, rp: { id: rpId, name: "Prekladač" }, user: { id: user.webauthn_user_id, name: user.username, displayName: user.username },
-      pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
-      authenticatorSelection: { residentKey: "required", userVerification: "required", authenticatorAttachment: "platform" }, attestation: "none",
-      excludeCredentials: store.passkeys(user.username).map(p => ({ type: "public-key", id: p.id })), timeout: 60000 });
+  // Async handler: Express 4 does not catch a rejected promise, so every failure must reach next() or the request hangs.
+  app.post("/api/passkeys/register/options", requireSession, async (req, res, next) => {
+    try {
+      // Only wrong passwords count, so the limit never blocks a user who registers several devices.
+      if (confirmRate.blocked(req.auth.username)) return res.status(429).json({ error: "Príliš veľa pokusov. Skús neskôr." });
+      // Counted before the slow check (parallel requests), given back when the password is right.
+      confirmRate.hit(req.auth.username);
+      if (await confirmPassword?.(req.auth.username, req.body?.password)) confirmRate.release(req.auth.username);
+      else {
+        logEvent("passkey_confirm_failed", { user: tag(req.auth.username) });
+        return res.status(403).json({ error: "Heslo nesúhlasí. Zadaj heslo, ktorým sa prihlasuješ.", code: "password_required" });
+      }
+      if (store.passkeys(req.auth.username).length >= 10) return res.status(400).json({ error: "Účet má najviac 10 prístupových kľúčov. Najprv niektorý odstráň." });
+      const challenge = issue("register:" + req.auth.id), user = store.getUser(req.auth.username);
+      res.json({ challenge, rp: { id: rpId, name: "Prekladač" }, user: { id: user.webauthn_user_id, name: user.username, displayName: user.username },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+        authenticatorSelection: { residentKey: "required", userVerification: "required", authenticatorAttachment: "platform" }, attestation: "none",
+        excludeCredentials: store.passkeys(user.username).map(p => ({ type: "public-key", id: p.id })), timeout: 60000 });
+    } catch (err) { next(err); }
   });
   app.post("/api/passkeys/register", requireSession, (req, res) => {
     let data, key, state;
@@ -82,7 +100,7 @@ function installPasskeyApi(app, { store, requireSession, finishLogin, origins, s
     });
     res.json({ ok: true });
   });
-  app.post("/api/passkeys/login/options", limited, (req, res) => {
+  app.post("/api/passkeys/login/options", optionsLimited, (req, res) => {
     challenges.delete(loginKey(req));
     const id = crypto.randomBytes(32).toString("base64url"), challenge = issue("login:" + id);
     res.setHeader("Set-Cookie", cookie(id + "." + sign(id), TTL / 1000));

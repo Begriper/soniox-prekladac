@@ -98,8 +98,13 @@ test("listen limit renews automatically after finishing and retains subtitles ac
   assert.equal(c.run('nodes.get("old/turn-1").article.classes.has("latest")'), false);
 });
 
-test("manual stop, idle, errors and conversation mode never trigger listen renewal", async () => {
-  for (const setup of ['mode="listen"; userStopped=true;', 'mode="conversation";', 'mode="listen"; document.visibilityState="hidden";']) {
+test("manual stop, idle, errors and a hidden page never trigger renewal; the time limit renews both modes", async () => {
+  for (const mode of ["listen", "conversation"]) {
+    const c = client(); c.run('running=true; conversationId="one"; globalThis.restarts=0; start=async()=>restarts++; mode=' + JSON.stringify(mode));
+    c.run('receive({type:"session_finished", conversation_id:"one", reason:"limit"});');
+    assert.equal(c.run("restarts"), 1, mode + " continues after the 30-minute limit");
+  }
+  for (const setup of ['mode="listen"; userStopped=true;', 'mode="conversation"; userStopped=true;', 'mode="listen"; document.visibilityState="hidden";']) {
     const c = client(); c.run('running=true; conversationId="one"; globalThis.restarts=0; start=async()=>restarts++;' + setup);
     c.run('receive({type:"session_finished", conversation_id:"one", reason:"limit"});');
     assert.equal(c.run("restarts"), 0);
@@ -132,4 +137,17 @@ test("conversation config is independent of a stored listen source after swappin
   const config = JSON.parse(c.sockets[0].sent[0]);
   assert.equal(config.mode, "conversation"); assert.equal(config.language_a, "de");
   assert.equal("listen_source" in config, false);
+});
+
+test("face-to-face marks the app shell so a sideways phone can drop the header (Android, 325 px high)", () => {
+  const c = client();
+  c.run("faceMode = true; controls();");
+  assert.equal(c.get("appShell").classes.has("face-on"), true);
+  c.chooseMode("listen");
+  assert.equal(c.get("appShell").classes.has("face-on"), false, "listening never shows the face halves");
+  c.chooseMode("conversation"); assert.equal(c.get("appShell").classes.has("face-on"), true);
+  c.run("faceMode = false; controls();");
+  assert.equal(c.get("appShell").classes.has("face-on"), false);
+  const css = readFileSync("public/style.css", "utf8");
+  assert.match(css, /max-height: 520px\)[^}]*\{[^@]*\.app\.face-on \.topbar/);
 });
